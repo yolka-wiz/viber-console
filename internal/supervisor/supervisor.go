@@ -55,9 +55,15 @@ func (s *Service) Start(ctx context.Context) error {
 	if s.EnvFile != "" {
 		env, err := readEnvFile(s.EnvFile)
 		if err != nil {
-			return fmt.Errorf("read env %s: %w", s.EnvFile, err)
+			// Missing env file is fine at first boot: the daemon starts
+			// with the inherited environment (defaults apply).
+			if !os.IsNotExist(err) {
+				return fmt.Errorf("read env %s: %w", s.EnvFile, err)
+			}
+			slog.Warn("env file missing, starting with inherited env", "service", s.Name, "env_file", s.EnvFile)
+		} else {
+			cmd.Env = append(cmd.Env, env...)
 		}
-		cmd.Env = append(cmd.Env, env...)
 	}
 
 	pipe, err := cmd.StderrPipe()

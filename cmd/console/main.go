@@ -104,6 +104,8 @@ func main() {
 	control := dashboard.NewControlHandler(store, cfgStore, services, cfg.vdAPI, cfg.token)
 	mux := handler.Routes()
 	control.Routes(mux)
+	mux.Handle("/static/", dashboard.StaticHandler())
+	mux.Handle("/", dashboard.StaticHandler())
 	srv := &http.Server{
 		Addr:              cfg.listen,
 		Handler:           mux,
