@@ -1,0 +1,207 @@
+package dashboard
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/yolka-wiz/viber-console/internal/collector"
+)
+
+func fakeViberaydServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"total": 120, "working": 8, "failed": 100, "unreachable": 12,
+			"updated_at": "2026-08-13T09:00:00Z",
+		})
+	})
+	mux.HandleFunc("/api/configs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"page": 1, "per_page": 50, "total": 1,
+			"configs": []map[string]interface{}{
+				{"host": "1.2.3.4", "port": 443, "protocol": "vless", "state": "working", "latency_ms": 120},
+			},
+		})
+	})
+	mux.HandleFunc("/api/urls", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]string{"https://example.com/sub"})
+	})
+	return httptest.NewServer(mux)
+}
+
+func fakeViberoxyServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte(`# TYPE viberoxy_wans_active gauge
+viberoxy_wans_active 1
+# TYPE viberoxy_wan_speed_mbps gauge
+viberoxy_wan_speed_mbps{index="0"} 42.5
+# TYPE viberoxy_proxy_connections_total counter
+viberoxy_proxy_connections_total{wan="0",proto="connect"} 10
+# TYPE viberoxy_proxy_latency_seconds histogram
+viberoxy_proxy_latency_seconds_bucket{le="0.1"} 5
+viberoxy_proxy_latency_seconds_bucket{le="1"} 10
+viberoxy_proxy_latency_seconds_bucket{le="+Inf"} 10
+viberoxy_proxy_latency_seconds_sum 3
+viberoxy_proxy_latency_seconds_count 10
+`))
+	})
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ready")) })
+	return httptest.NewServer(mux)
+}
+
+func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	vdSrv := fakeViberaydServer(t)
+	vxSrv := fakeViberoxyServer(t)
+	t.Cleanup(vdSrv.Close)
+	t.Cleanup(vxSrv.Close)
+
+	vd := collector.NewViberaydClient(vdSrv.URL, vdSrv.URL, 2*time.Second)
+	vx := collector.NewViberoxyClient(vxSrv.URL, 2*time.Second)
+	store := NewStore(50*time.Millisecond, vd, vx)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go store.Run(ctx)
+
+	// Wait for the first poll to land.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if store.Get().ViberaydUp && store.Get().ViberoxyUp {
+			return store
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("store never became ready")
+	return nil
+}
+
+func getJSON(t *testing.T, h *Handler, path string) map[string]interface{} {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200 (body %s)", path, rec.Code, rec.Body.String())
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	return out
+}
+
+func TestHandlerOverview(t *testing.T) {
+	store := newTestStore(t)
+	h := NewHandler(store)
+
+	out := getJSON(t, h, "/api/overview")
+
+	vd := out["viberayd"].(map[string]interface{})
+	if vd["reachable"] != true {
+		t.Error("viberayd.reachable = false, want true")
+	}
+	stats := vd["stats"].(map[string]interface{})
+	if stats["working"] != float64(8) {
+		t.Errorf("viberayd stats.working = %v, want 8", stats["working"])
+	}
+
+	vx := out["viberoxy"].(map[string]interface{})
+	if vx["reachable"] != true {
+		t.Error("viberoxy.reachable = false, want true")
+	}
+	wans := vx["wans"].(map[string]interface{})
+	if wans["active"] != float64(1) {
+		t.Errorf("viberoxy wans.active = %v, want 1", wans["active"])
+	}
+	health := vx["health"].(map[string]interface{})
+	if health["healthz"] != "ok" || health["readyz"] != "ready" {
+		t.Errorf("health = %v, want ok/ready", health)
+	}
+}
+
+func TestHandlerHealth(t *testing.T) {
+	store := newTestStore(t)
+	h := NewHandler(store)
+
+	out := getJSON(t, h, "/api/health")
+	if out["status"] != "ok" {
+		t.Errorf("status = %v, want ok", out["status"])
+	}
+}
+
+func TestHandlerViberaydConfigs(t *testing.T) {
+	store := newTestStore(t)
+	h := NewHandler(store)
+
+	out := getJSON(t, h, "/api/viberayd/configs?page=1&per_page=50")
+	if out["total"] != float64(1) {
+		t.Errorf("total = %v, want 1", out["total"])
+	}
+	configs := out["configs"].([]interface{})
+	if len(configs) != 1 {
+		t.Fatalf("configs len = %d, want 1", len(configs))
+	}
+}
+
+func TestHandlerViberaydURLs(t *testing.T) {
+	store := newTestStore(t)
+	h := NewHandler(store)
+
+	out := getJSON(t, h, "/api/viberayd/urls")
+	urls := out["urls"].([]interface{})
+	if len(urls) != 1 || urls[0] != "https://example.com/sub" {
+		t.Errorf("urls = %v, want [https://example.com/sub]", urls)
+	}
+}
+
+func TestHandlerViberoxyMetrics(t *testing.T) {
+	store := newTestStore(t)
+	h := NewHandler(store)
+
+	out := getJSON(t, h, "/api/viberoxy/metrics")
+	if out["wans_active"] != float64(1) {
+		t.Errorf("wans_active = %v, want 1", out["wans_active"])
+	}
+}
+
+func TestHandlerOverview_DaemonDown(t *testing.T) {
+	// A store with an unreachable viberoxy should still serve the overview
+	// with reachable=false instead of erroring.
+	vdSrv := fakeViberaydServer(t)
+	t.Cleanup(vdSrv.Close)
+	vd := collector.NewViberaydClient(vdSrv.URL, vdSrv.URL, 2*time.Second)
+	vx := collector.NewViberoxyClient("http://127.0.0.1:1", 200*time.Millisecond)
+	store := NewStore(50*time.Millisecond, vd, vx)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go store.Run(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s := store.Get()
+		if s.ViberaydUp && !s.ViberoxyUp {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	h := NewHandler(store)
+	out := getJSON(t, h, "/api/overview")
+	vxOut := out["viberoxy"].(map[string]interface{})
+	if vxOut["reachable"] != false {
+		t.Error("viberoxy.reachable = true, want false (daemon down)")
+	}
+}
