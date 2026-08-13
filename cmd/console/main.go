@@ -13,26 +13,36 @@ import (
 	"time"
 
 	"github.com/yolka-wiz/viber-console/internal/collector"
+	"github.com/yolka-wiz/viber-console/internal/config"
 	"github.com/yolka-wiz/viber-console/internal/dashboard"
+	"github.com/yolka-wiz/viber-console/internal/supervisor"
 )
 
-type config struct {
+type settings struct {
 	listen       string
 	pollInterval time.Duration
 	vdAPI        string
 	vdSub        string
 	vxMetrics    string
 	logLevel     string
+	configDir    string
+	viberaydBin  string
+	viberoxyBin  string
+	token        string
 }
 
-func loadConfig() config {
-	cfg := config{
+func loadConfig() settings {
+	cfg := settings{
 		listen:       env("CONSOLE_LISTEN", ":8090"),
 		pollInterval: envDuration("CONSOLE_POLL_INTERVAL", 10*time.Second),
 		vdAPI:        env("VIBERAYD_API_URL", "http://127.0.0.1:8081"),
 		vdSub:        env("VIBERAYD_SUB_URL", "http://127.0.0.1:8080"),
 		vxMetrics:    env("VIBEROXY_METRICS_URL", "http://127.0.0.1:9090"),
 		logLevel:     env("CONSOLE_LOG_LEVEL", "info"),
+		configDir:    env("VIBER_CONFIG_DIR", "/etc/viber"),
+		viberaydBin:  env("VIBERAYD_BIN", "viberayd"),
+		viberoxyBin:  env("VIBEROXY_BIN", "viberoxy"),
+		token:        os.Getenv("CONSOLE_TOKEN"),
 	}
 	return cfg
 }
@@ -73,10 +83,30 @@ func main() {
 
 	go store.Run(ctx)
 
+	// Supervised services: console owns the daemons' lifecycle.
+	cfgStore := config.NewStore(cfg.configDir)
+	services := []*supervisor.Service{
+		supervisor.NewService("viberayd", cfg.viberaydBin, cfgStore.FileName("viberayd")),
+		supervisor.NewService("viberoxy", cfg.viberoxyBin, cfgStore.FileName("viberoxy")),
+	}
+	for _, s := range services {
+		if err := s.Start(ctx); err != nil {
+			slog.Warn("service failed to start (continuing; may be launched separately)", "service", s.Name, "error", err)
+		}
+	}
+	defer func() {
+		for _, s := range services {
+			s.Stop()
+		}
+	}()
+
 	handler := dashboard.NewHandler(store)
+	control := dashboard.NewControlHandler(store, cfgStore, services, cfg.vdAPI, cfg.token)
+	mux := handler.Routes()
+	control.Routes(mux)
 	srv := &http.Server{
 		Addr:              cfg.listen,
-		Handler:           handler.Routes(),
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

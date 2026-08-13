@@ -109,13 +109,16 @@ flowchart LR
 
 ## 5. Design language
 
-- **Dark theme** (proxy/VPN tool aesthetic), CSS variables for palette:
-  `--bg: #0f1115`, `--card: #171a21`, `--accent: #3b82f6`, `--ok: #22c55e`,
-  `--warn: #f59e0b`, `--err: #ef4444`, `--text: #e5e7eb`.
+- **Light/dark theme toggle** (user decision) — default follows `prefers-color-scheme`,
+  manual toggle persisted in `localStorage`. CSS variables define both palettes:
+  - Dark: `--bg: #0f1115`, `--card: #171a21`, `--accent: #3b82f6`, `--ok: #22c55e`,
+    `--warn: #f59e0b`, `--err: #ef4444`, `--text: #e5e7eb`
+  - Light: `--bg: #f5f6f8`, `--card: #ffffff`, `--accent: #2563eb`, `--ok: #16a34a`,
+    `--warn: #d97706`, `--err: #dc2626`, `--text: #1f2937`
 - Cards with 1px border + subtle radius, no heavy shadows; status = color-coded pill.
 - System font stack (`system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`) —
   zero font downloads.
-- Inline SVG icons (refresh, search, menu, dot) — no icon dependency.
+- Inline SVG icons (refresh, search, menu, dot, sun/moon) — no icon dependency.
 - Numbers formatted with `Intl.NumberFormat`; latency in ms with one decimal.
 - Empty/error states: explicit `daemon unreachable` card instead of blank.
 
@@ -225,12 +228,10 @@ console never edits daemon source.
 Each phase lands as a commit; the UI is verified with the smoke-test mock daemons
 plus a headless render check.
 
-## 11. Open questions for the user
+## 11. Decisions (user-confirmed)
 
-1. **Supervisor model:** console spawns daemons as children (recommended, Docker-friendly)
-   vs systemd units for the daemons? (Affects §8 and restart UX.)
-2. **Theme:** dark-only (recommended) vs light/dark toggle?
-3. **Config scope:** are the §6 lists the right "core parameters", or add/remove any?
-4. **Auth posture:** localhost-only default with token when exposed — OK?
-5. **Language of the UI:** English only, or Persian/localized labels? (Family projects
-   are English; flagging since user is Persian-speaking.)
+1. **Supervisor model:** console spawns daemons as children — ✅ confirmed.
+2. **Theme:** light/dark toggle (default = system preference) — ✅ confirmed.
+3. **Config scope:** §6 lists are the starting point; adjustable during build.
+4. **Auth posture:** localhost-only default, token when exposed — assumed OK (flag if not).
+5. **UI language:** English (family convention) — assumed OK (flag if not).
