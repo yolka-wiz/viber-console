@@ -42,6 +42,7 @@ var Fields = []Field{
 	{Key: "DAEMON_KEEP_SUCCESSFUL", Group: "viberayd", Label: "Keep successful", Description: "Re-test working configs.", Type: TypeBool, Default: "true"},
 	{Key: "DAEMON_RETEST_INTERVAL", Group: "viberayd", Label: "Retest interval (s)", Description: "Seconds before re-testing a working config.", Type: TypeInt, Default: "1800", Min: intp(0)},
 	{Key: "DAEMON_MAX_LATENCY_MS", Group: "viberayd", Label: "Max latency (ms)", Description: "Reject configs slower than this (0 = disabled).", Type: TypeInt, Default: "0", Min: intp(0)},
+	{Key: "DAEMON_TCP_PING", Group: "viberayd", Label: "TCP ping gate", Description: "Fast TCP-connect prefilter before the xray test. Disable on networks that filter direct TCP to foreign hosts, or everything is marked unreachable.", Type: TypeBool, Default: "true"},
 	{Key: "HTTP_ENABLED", Group: "viberayd", Label: "HTTP API enabled", Type: TypeBool, Default: "false"},
 	{Key: "HTTP_PORT", Group: "viberayd", Label: "Sub port", Type: TypeInt, Default: "8080", Min: intp(0), Max: intp(65535)},
 	{Key: "HTTP_SUB_PATH", Group: "viberayd", Label: "Sub path", Type: TypeString, Default: "/sub"},
