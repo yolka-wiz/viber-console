@@ -193,8 +193,55 @@ async function loadSettings() {
     state.schema = schema;
     state.values = values;
     renderSettingsForm();
+    loadURLs();
   } catch (e) {
     $("#settings-fields").innerHTML = `<div class="empty-state">settings unavailable: ${esc(e.message)}</div>`;
+  }
+}
+
+/* ---- Subscription URLs (viberayd) ---- */
+
+async function loadURLs() {
+  if (state.group !== "viberayd") return;
+  try {
+    const res = await api("/api/viberayd/urls");
+    $("#urls-card").hidden = false;
+    $("#urls-textarea").value = (res.urls || []).join("\n");
+    clearURLsMsg();
+  } catch (e) {
+    // viberayd unreachable: keep the card hidden rather than showing an error
+    // that would block the settings form.
+    $("#urls-card").hidden = true;
+  }
+}
+
+function clearURLsMsg() {
+  const el = $("#urls-msg");
+  el.className = "form-msg";
+  el.textContent = "";
+}
+
+async function applyURLs() {
+  const btn = $("#urls-apply");
+  btn.disabled = true;
+  clearURLsMsg();
+  try {
+    const lines = $("#urls-textarea").value.split("\n");
+    const res = await api("/api/viberayd/urls", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ urls: lines }),
+    });
+    $("#urls-textarea").value = (res.urls || []).join("\n");
+    $("#urls-msg").className = "form-msg";
+    $("#urls-msg").textContent = "URLs applied (" + (res.urls || []).length + ")";
+    toast("Subscription URLs updated", "ok");
+  } catch (e) {
+    $("#urls-msg").className = "form-msg err";
+    $("#urls-msg").textContent = "error: " + e.message;
+    toast("URLs apply failed: " + e.message, "err");
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -290,6 +337,7 @@ function init() {
   $("#state-filter").addEventListener("change", loadConfigs);
   $("#search").addEventListener("input", debounce(loadConfigs, 250));
   $("#settings-form").addEventListener("submit", saveSettings);
+  $("#urls-apply").addEventListener("click", applyURLs);
 
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -297,6 +345,7 @@ function init() {
       tab.classList.add("active");
       state.group = tab.dataset.group;
       renderSettingsForm();
+      loadURLs(); // shows the URLs card only on the viberayd tab
     });
   });
 

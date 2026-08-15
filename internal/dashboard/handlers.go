@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -104,15 +106,65 @@ func (h *Handler) handleViberaydConfigs(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *Handler) handleViberaydURLs(w http.ResponseWriter, r *http.Request) {
-	urls, err := h.store.FetchURLs(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{
-			"error":   "viberayd unreachable",
-			"details": err.Error(),
-		})
-		return
+	switch r.Method {
+	case http.MethodGet:
+		urls, err := h.store.FetchURLs(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{
+				"error":   "viberayd unreachable",
+				"details": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"urls": urls})
+
+	case http.MethodPut:
+		var req struct {
+			URLs []string `json:"urls"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+			return
+		}
+		valid, invalid := validateURLList(req.URLs)
+		if len(invalid) > 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"error":   "invalid url(s)",
+				"invalid": invalid,
+			})
+			return
+		}
+		urls, err := h.store.ReplaceURLs(r.Context(), valid)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{
+				"error":   "viberayd unreachable",
+				"details": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"urls": urls})
+
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"urls": urls})
+}
+
+// validateURLList trims lines, drops blanks/comments, and rejects anything
+// that is not an http(s) URL. Returns the clean list and the invalid lines.
+func validateURLList(urls []string) (valid, invalid []string) {
+	for _, raw := range urls {
+		u := strings.TrimSpace(raw)
+		if u == "" || strings.HasPrefix(u, "#") {
+			continue
+		}
+		parsed, err := url.Parse(u)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			invalid = append(invalid, u)
+			continue
+		}
+		valid = append(valid, u)
+	}
+	return valid, invalid
 }
 
 func (h *Handler) handleViberoxyMetrics(w http.ResponseWriter, r *http.Request) {

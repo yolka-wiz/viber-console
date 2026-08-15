@@ -232,6 +232,25 @@ select.input { min-width: 150px; }
   font-size: 0.8rem;
   border-top: 1px solid var(--border);
 }
+
+/* ---- Subscription URLs card ---- */
+.urls-card { margin-bottom: 16px; }
+.urls-card .card-title { font-size: 0.95rem; margin-bottom: 4px; }
+.urls-card .desc { color: var(--muted); font-size: 0.78rem; margin-bottom: 10px; }
+.urls-textarea {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  resize: vertical;
+  line-height: 1.6;
+}
+.urls-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
 .toast {
   position: fixed;
   bottom: 20px;

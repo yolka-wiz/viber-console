@@ -125,3 +125,8 @@ func (s *Store) FetchConfigs(ctx context.Context, page, perPage int, state strin
 func (s *Store) FetchURLs(ctx context.Context) ([]string, error) {
 	return s.vd.FetchURLs(ctx)
 }
+
+// ReplaceURLs proxies a full-list replace of viberayd subscription URLs.
+func (s *Store) ReplaceURLs(ctx context.Context, want []string) ([]string, error) {
+	return s.vd.ReplaceURLs(ctx, want)
+}

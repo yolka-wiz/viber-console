@@ -25,26 +25,29 @@ func (s *Store) FileName(group string) string {
 	return filepath.Join(s.dir, group+".env")
 }
 
-// Values returns the current values of the editable fields, reading from the
-// env files (present keys only) plus the process environment as fallback.
+// Values returns the effective values of the editable fields for a group:
+// file values win, missing keys fall back to the schema default. This mirrors
+// what the daemon itself runs with (its env file, else its built-in
+// defaults), so the UI always shows the running config and Apply never
+// clobbers an unset value with an empty string.
 func (s *Store) Values(group string) (map[string]string, error) {
 	values := map[string]string{}
-	file := s.FileName(group)
 
-	// Process env fallback first (so a daemon started manually shows up).
+	// Schema defaults first (the daemon's fallback when the env file lacks
+	// a key — do NOT use the console's own process env, it is unrelated).
 	for _, f := range Fields {
-		if f.Group == group {
-			if v, ok := os.LookupEnv(f.Key); ok {
-				values[f.Key] = v
-			}
+		if f.Group == group && f.Default != "" {
+			values[f.Key] = f.Default
 		}
 	}
 
-	// File values win.
+	file := s.FileName(group)
+
+	// File values win over defaults.
 	data, err := os.ReadFile(file)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return values, nil // no file yet: process env only
+			return values, nil // no file yet: defaults only
 		}
 		return nil, fmt.Errorf("read %s: %w", file, err)
 	}

@@ -66,6 +66,18 @@
         <button class="tab active" data-group="viberayd">Viberayd</button>
         <button class="tab" data-group="viberoxy">Viberoxy</button>
       </div>
+
+      <div class="urls-card card" id="urls-card" hidden>
+        <h3 class="card-title">Subscription URLs (viberayd)</h3>
+        <p class="desc">One URL per line. Invalid lines are rejected on Apply.</p>
+        <textarea id="urls-textarea" class="input urls-textarea" rows="6" spellcheck="false"
+          placeholder="https://example.com/sub&#10;https://another.example/sub"></textarea>
+        <div class="urls-actions">
+          <span class="form-msg" id="urls-msg"></span>
+          <button type="button" id="urls-apply" class="btn primary">Apply URLs</button>
+        </div>
+      </div>
+
       <form id="settings-form" autocomplete="off">
         <div id="settings-fields"></div>
         <div class="form-actions">

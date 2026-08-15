@@ -139,6 +139,33 @@ func TestStoreValuesMissingFile(t *testing.T) {
 	if vals == nil {
 		t.Error("expected non-nil map")
 	}
+	// Missing file → schema defaults, so the form shows the effective config.
+	if vals["WAN_COUNT"] != "4" {
+		t.Errorf("WAN_COUNT = %q, want default 4", vals["WAN_COUNT"])
+	}
+	if vals["XRAY_MUX"] != "true" {
+		t.Errorf("XRAY_MUX = %q, want default true", vals["XRAY_MUX"])
+	}
+}
+
+func TestStoreValuesFileWinsOverDefault(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+
+	if _, err := s.Update("viberoxy", map[string]string{"WAN_COUNT": "2"}); err != nil {
+		t.Fatal(err)
+	}
+	vals, err := s.Values("viberoxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vals["WAN_COUNT"] != "2" {
+		t.Errorf("WAN_COUNT = %q, want 2 (file wins)", vals["WAN_COUNT"])
+	}
+	// Unset keys still fall back to defaults (complete effective config).
+	if vals["XRAY_MUX"] != "true" {
+		t.Errorf("XRAY_MUX = %q, want default true", vals["XRAY_MUX"])
+	}
 }
 
 func TestSchemaFieldByKey(t *testing.T) {

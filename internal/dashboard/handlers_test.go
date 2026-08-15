@@ -1,10 +1,14 @@
 package dashboard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +17,9 @@ import (
 
 func fakeViberaydServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	var urlsMu sync.Mutex
+	urls := []string{"https://example.com/sub"}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -31,8 +38,47 @@ func fakeViberaydServer(t *testing.T) *httptest.Server {
 		})
 	})
 	mux.HandleFunc("/api/urls", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]string{"https://example.com/sub"})
+		switch r.Method {
+		case http.MethodGet:
+			urlsMu.Lock()
+			out := append([]string(nil), urls...)
+			urlsMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(out)
+		case http.MethodPost:
+			var body struct{ URL string `json:"url"` }
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "bad json", http.StatusBadRequest)
+				return
+			}
+			urlsMu.Lock()
+			urls = append(urls, body.URL)
+			urlsMu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"status": "added"})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/urls/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		idStr := strings.TrimPrefix(r.URL.Path, "/api/urls/")
+		id, err := strconv.Atoi(idStr)
+		if err != nil || id < 1 {
+			http.Error(w, "bad id", http.StatusBadRequest)
+			return
+		}
+		urlsMu.Lock()
+		defer urlsMu.Unlock()
+		if id > len(urls) {
+			http.Error(w, "out of range", http.StatusNotFound)
+			return
+		}
+		urls = append(urls[:id-1], urls[id:]...)
+		json.NewEncoder(w).Encode(map[string]string{"status": "removed"})
 	})
 	return httptest.NewServer(mux)
 }
@@ -164,6 +210,83 @@ func TestHandlerViberaydURLs(t *testing.T) {
 	urls := out["urls"].([]interface{})
 	if len(urls) != 1 || urls[0] != "https://example.com/sub" {
 		t.Errorf("urls = %v, want [https://example.com/sub]", urls)
+	}
+}
+
+func TestHandlerViberaydURLsPut(t *testing.T) {
+	store := newTestStore(t)
+	h := NewHandler(store)
+
+	// PUT a new full list (the fake viberayd accepts POST/DELETE and the
+	// store's diff-based replace applies it).
+	var buf bytes.Buffer
+	json.NewEncoder(&buf).Encode(map[string]interface{}{
+		"urls": []string{
+			"https://example.com/sub",
+			"https://second.example/sub",
+		},
+	})
+	req := httptest.NewRequest(http.MethodPut, "/api/viberayd/urls", &buf)
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT urls = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	urls := out["urls"].([]interface{})
+	if len(urls) != 2 {
+		t.Errorf("urls after PUT = %v, want 2", urls)
+	}
+}
+
+func TestHandlerViberaydURLsPutInvalid(t *testing.T) {
+	store := newTestStore(t)
+	h := NewHandler(store)
+
+	var buf bytes.Buffer
+	json.NewEncoder(&buf).Encode(map[string]interface{}{
+		"urls": []string{
+			"https://good.example/sub",
+			"not-a-url",
+			"ftp://bad.example/x",
+		},
+	})
+	req := httptest.NewRequest(http.MethodPut, "/api/viberayd/urls", &buf)
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT invalid urls = %d, want 400", rec.Code)
+	}
+	var out map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	invalid := out["invalid"].([]interface{})
+	if len(invalid) != 2 {
+		t.Errorf("invalid lines = %v, want 2 rejected", invalid)
+	}
+}
+
+func TestValidateURLList(t *testing.T) {
+	valid, invalid := validateURLList([]string{
+		"  https://a.example/sub  ",
+		"http://b.example",
+		"# comment",
+		"",
+		"not-a-url",
+		"ftp://c.example",
+	})
+	if len(valid) != 2 {
+		t.Errorf("valid = %v, want 2", valid)
+	}
+	if valid[0] != "https://a.example/sub" {
+		t.Errorf("valid[0] = %q, want trimmed url", valid[0])
+	}
+	if len(invalid) != 2 {
+		t.Errorf("invalid = %v, want 2", invalid)
 	}
 }
 
