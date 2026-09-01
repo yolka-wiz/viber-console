@@ -65,6 +65,61 @@ func TestServiceRestartIncrements(t *testing.T) {
 	s.Stop()
 }
 
+func TestServiceAutoRestart(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pids")
+	s := NewService("crasher", "/bin/sh", "", "-c", `printf '%s\n' "$$" >> "$1"; exit 1`, "sh", pidFile)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		st := s.Status()
+		data, err := os.ReadFile(pidFile)
+		pids := strings.Fields(string(data))
+		if st.Restarts >= 2 && err == nil && len(pids) >= 2 {
+			if pids[0] == pids[1] {
+				t.Errorf("restarted child PID = %s, want a different PID from the initial child", pids[1])
+			}
+			if !st.AutoRestart {
+				t.Error("status AutoRestart = false, want true")
+			}
+			if st.LastRestartAt.IsZero() {
+				t.Error("status LastRestartAt is zero after restart")
+			}
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	st := s.Status()
+	data, _ := os.ReadFile(pidFile)
+	t.Fatalf("status = %+v, recorded PIDs = %q after 3s; want at least one restart", st, data)
+}
+
+func TestServiceAutoRestartDisabled(t *testing.T) {
+	s := NewService("crasher", "/bin/sh", "", "-c", "exit 1")
+	s.AutoRestart = false
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+
+	st := s.Status()
+	if st.Restarts != 1 {
+		t.Errorf("restarts = %d, want 1", st.Restarts)
+	}
+	if st.AutoRestart {
+		t.Error("status AutoRestart = true, want false")
+	}
+}
+
 func TestServiceStderrTail(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "printer")

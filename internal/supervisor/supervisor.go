@@ -18,24 +18,32 @@ type Service struct {
 	Binary    string
 	EnvFile   string // env file the process reads (or empty)
 	ExtraArgs []string
+	// AutoRestart restarts the child after an unexpected exit. New services
+	// enable this policy by default.
+	AutoRestart bool
 
-	mu       sync.Mutex
-	cmd      *exec.Cmd
-	started  time.Time
-	restarts int
-	stderr   *ringBuffer
-	lastErr  string
-	exitCh   chan struct{} // closed by the reaper when the process exits
+	mu             sync.Mutex
+	cmd            *exec.Cmd
+	started        time.Time
+	restarts       int
+	stderr         *ringBuffer
+	lastErr        string
+	lastRestartAt  time.Time
+	restartBackoff time.Duration
+	stopping       bool
+	exitCh         chan struct{} // closed by the reaper when the process exits
 }
 
 // NewService creates a service definition.
 func NewService(name, binary, envFile string, extraArgs ...string) *Service {
 	return &Service{
-		Name:      name,
-		Binary:    binary,
-		EnvFile:   envFile,
-		ExtraArgs: extraArgs,
-		stderr:    newRingBuffer(50),
+		Name:           name,
+		Binary:         binary,
+		EnvFile:        envFile,
+		ExtraArgs:      extraArgs,
+		AutoRestart:    true,
+		stderr:         newRingBuffer(50),
+		restartBackoff: time.Second,
 	}
 }
 
@@ -78,8 +86,9 @@ func (s *Service) Start(ctx context.Context) error {
 	s.cmd = cmd
 	s.started = time.Now()
 	s.restarts++
-	s.lastErr = ""
+	s.stopping = false
 	s.exitCh = make(chan struct{})
+	exitCh := s.exitCh
 
 	// Tail stderr into the ring buffer.
 	go func() {
@@ -107,13 +116,51 @@ func (s *Service) Start(ctx context.Context) error {
 	go func() {
 		err := cmd.Wait()
 		s.mu.Lock()
-		s.cmd = nil
+		if s.cmd == cmd {
+			s.cmd = nil
+		}
 		if err != nil {
 			s.lastErr = err.Error()
 		}
-		close(s.exitCh)
+		close(exitCh)
+		shouldRestart := s.AutoRestart && !s.stopping && ctx.Err() == nil
+		delay := s.restartBackoff
+		if delay <= 0 {
+			delay = time.Second
+		}
+		s.restartBackoff = min(delay*2, 30*time.Second)
 		s.mu.Unlock()
 		slog.Warn("service exited", "service", s.Name, "err", err)
+
+		if !shouldRestart {
+			return
+		}
+
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+
+		s.mu.Lock()
+		shouldRestart = s.AutoRestart && !s.stopping && s.cmd == nil
+		s.mu.Unlock()
+		if !shouldRestart {
+			return
+		}
+
+		if err := s.Start(ctx); err != nil {
+			s.mu.Lock()
+			s.lastErr = err.Error()
+			s.mu.Unlock()
+			slog.Error("service restart failed", "service", s.Name, "err", err)
+			return
+		}
+		s.mu.Lock()
+		s.lastRestartAt = time.Now()
+		s.mu.Unlock()
 	}()
 
 	slog.Info("service started", "service", s.Name, "pid", cmd.Process.Pid, "restarts", s.restarts)
@@ -140,6 +187,7 @@ func (s *Service) Stop() {
 	s.mu.Lock()
 	cmd := s.cmd
 	exitCh := s.exitCh
+	s.stopping = true
 	s.cmd = nil
 	s.mu.Unlock()
 
@@ -160,14 +208,16 @@ func (s *Service) Stop() {
 
 // Status returns the current process view for the API.
 type Status struct {
-	Name      string    `json:"name"`
-	Running   bool      `json:"running"`
-	Pid       int       `json:"pid,omitempty"`
-	UptimeSec int64     `json:"uptime_sec,omitempty"`
-	Restarts  int       `json:"restarts"`
-	LastError string    `json:"last_error,omitempty"`
-	Stderr    []string  `json:"stderr_tail"`
-	StartedAt time.Time `json:"started_at,omitempty"`
+	Name          string    `json:"name"`
+	Running       bool      `json:"running"`
+	Pid           int       `json:"pid,omitempty"`
+	UptimeSec     int64     `json:"uptime_sec,omitempty"`
+	Restarts      int       `json:"restarts"`
+	AutoRestart   bool      `json:"auto_restart"`
+	LastRestartAt time.Time `json:"last_restart_at,omitempty"`
+	LastError     string    `json:"last_error,omitempty"`
+	Stderr        []string  `json:"stderr_tail"`
+	StartedAt     time.Time `json:"started_at,omitempty"`
 }
 
 func (s *Service) Status() Status {
@@ -175,11 +225,13 @@ func (s *Service) Status() Status {
 	defer s.mu.Unlock()
 
 	st := Status{
-		Name:     s.Name,
-		Running:  s.cmd != nil && s.cmd.Process != nil,
-		Restarts: s.restarts,
-		LastError: s.lastErr,
-		Stderr:   s.stderr.Lines(),
+		Name:          s.Name,
+		Running:       s.cmd != nil && s.cmd.Process != nil,
+		Restarts:      s.restarts,
+		AutoRestart:   s.AutoRestart,
+		LastRestartAt: s.lastRestartAt,
+		LastError:     s.lastErr,
+		Stderr:        s.stderr.Lines(),
 	}
 	if st.Running {
 		st.Pid = s.cmd.Process.Pid
