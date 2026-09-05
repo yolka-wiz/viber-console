@@ -142,6 +142,36 @@ func (v *ViberoxyClient) FetchMetrics(ctx context.Context) (ViberoxySnapshot, er
 	return snap, nil
 }
 
+// FetchWANSlots fetches the per-slot WAN state from viberoxy's
+// /api/viberoxy/wans endpoint and returns the raw JSON body along with the
+// upstream HTTP status code. Errors indicate transport-level failures.
+func (v *ViberoxyClient) FetchWANSlots(ctx context.Context) ([]byte, int, error) {
+	return v.client.GetRaw(ctx, v.url+"/api/viberoxy/wans")
+}
+
+// FetchCandidates fetches the candidate pool from viberoxy's
+// /api/viberoxy/candidates endpoint and returns the raw JSON body along with
+// the upstream HTTP status code. Errors indicate transport-level failures.
+func (v *ViberoxyClient) FetchCandidates(ctx context.Context) ([]byte, int, error) {
+	return v.client.GetRaw(ctx, v.url+"/api/viberoxy/candidates")
+}
+
+// DropWAN sends a drop request to viberoxy's
+// /api/viberoxy/wans/{index}/drop endpoint and returns the raw JSON response
+// along with the upstream HTTP status code. Errors indicate transport-level
+// failures; application-level errors are reflected in the status code.
+func (v *ViberoxyClient) DropWAN(ctx context.Context, index int) ([]byte, int, error) {
+	return v.client.Post(ctx, v.url+"/api/viberoxy/wans/"+strconv.Itoa(index)+"/drop")
+}
+
+// TriggerCycle sends a manual cycle trigger to viberoxy's
+// /api/viberoxy/cycle/trigger endpoint and returns the raw JSON response
+// along with the upstream HTTP status code. Errors indicate transport-level
+// failures.
+func (v *ViberoxyClient) TriggerCycle(ctx context.Context) ([]byte, int, error) {
+	return v.client.Post(ctx, v.url+"/api/viberoxy/cycle/trigger")
+}
+
 // Healthz returns the raw healthz response body (or error).
 func (v *ViberoxyClient) Healthz(ctx context.Context) (string, error) {
 	body, err := v.client.Get(ctx, v.url+"/healthz")

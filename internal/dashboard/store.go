@@ -130,3 +130,23 @@ func (s *Store) FetchURLs(ctx context.Context) ([]string, error) {
 func (s *Store) ReplaceURLs(ctx context.Context, want []string) ([]string, error) {
 	return s.vd.ReplaceURLs(ctx, want)
 }
+
+// FetchWANSlots proxies the per-slot WAN state from viberoxy.
+func (s *Store) FetchWANSlots(ctx context.Context) ([]byte, int, error) {
+	return s.vx.FetchWANSlots(ctx)
+}
+
+// FetchCandidates proxies the candidate pool from viberoxy.
+func (s *Store) FetchCandidates(ctx context.Context) ([]byte, int, error) {
+	return s.vx.FetchCandidates(ctx)
+}
+
+// DropWAN proxies a drop request to viberoxy for the given WAN slot index.
+func (s *Store) DropWAN(ctx context.Context, index int) ([]byte, int, error) {
+	return s.vx.DropWAN(ctx, index)
+}
+
+// TriggerCycle proxies a manual cycle trigger to viberoxy.
+func (s *Store) TriggerCycle(ctx context.Context) ([]byte, int, error) {
+	return s.vx.TriggerCycle(ctx)
+}
