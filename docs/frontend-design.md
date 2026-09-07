@@ -56,7 +56,8 @@ Frontend stack detail:
 flowchart LR
     U[Browser / Phone] -->|HTTPS or localhost| C[console :8090]
     C -->|GET /api/*| VD[Viberayd :8081 JSON API]
-    C -->|GET /metrics /healthz /readyz| VX[Viberoxy :9090 Prometheus]
+    C -->|GET /metrics /healthz /readyz| VXM[Viberoxy :9090 observability]
+    C -->|GET/POST /api/viberoxy/*| VXA[Viberoxy :1980 control API]
     C -->|read/write env files + restart| ENV[/etc/viber/viberayd.env, viberoxy.env]
     C -->|spawn/reap| P1[viberayd process]
     C -->|spawn/reap| P2[viberoxy process]

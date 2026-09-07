@@ -24,6 +24,7 @@ type settings struct {
 	vdAPI        string
 	vdSub        string
 	vxMetrics    string
+	vxAPI        string
 	logLevel     string
 	configDir    string
 	viberaydBin  string
@@ -38,6 +39,7 @@ func loadConfig() settings {
 		vdAPI:        env("VIBERAYD_API_URL", "http://127.0.0.1:8081"),
 		vdSub:        env("VIBERAYD_SUB_URL", "http://127.0.0.1:8080"),
 		vxMetrics:    env("VIBEROXY_METRICS_URL", "http://127.0.0.1:9090"),
+		vxAPI:        env("VIBEROXY_API_URL", "http://127.0.0.1:1980"),
 		logLevel:     env("CONSOLE_LOG_LEVEL", "info"),
 		configDir:    env("VIBER_CONFIG_DIR", "/etc/viber"),
 		viberaydBin:  env("VIBERAYD_BIN", "viberayd"),
@@ -74,7 +76,7 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 
 	vd := collector.NewViberaydClient(cfg.vdAPI, cfg.vdSub, 5*time.Second)
-	vx := collector.NewViberoxyClient(cfg.vxMetrics, 5*time.Second)
+	vx := collector.NewViberoxyClientWithAPI(cfg.vxMetrics, cfg.vxAPI, 5*time.Second)
 
 	store := dashboard.NewStore(cfg.pollInterval, vd, vx)
 

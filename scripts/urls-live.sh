@@ -54,7 +54,7 @@ trap cleanup EXIT
 sleep 0.5
 
 rm -rf /tmp/viber-cfg-live2
-VIBER_CONFIG_DIR=/tmp/viber-cfg-live2 VIBERAYD_API_URL=http://127.0.0.1:18081 VIBEROXY_METRICS_URL=http://127.0.0.1:19090 /tmp/viber-console-ui > /tmp/console-live.log 2>&1 &
+VIBER_CONFIG_DIR=/tmp/viber-cfg-live2 VIBERAYD_API_URL=http://127.0.0.1:18081 VIBEROXY_METRICS_URL=http://127.0.0.1:19090 VIBEROXY_API_URL=http://127.0.0.1:19090 /tmp/viber-console-ui > /tmp/console-live.log 2>&1 &
 CONSOLE_PID=$!
 sleep 1.2
 
