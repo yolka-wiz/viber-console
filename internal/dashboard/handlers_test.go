@@ -104,6 +104,44 @@ viberoxy_proxy_latency_seconds_count 10
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ready")) })
+
+	mux.HandleFunc("/api/viberoxy/wans", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[{"index":0,"state":"active","speed_mbps":42.5,"conns":10,"exit_ip":"203.0.113.1"}]`))
+	})
+
+	mux.HandleFunc("/api/viberoxy/candidates", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[{"name":"cfg1","server":"1.2.3.4","port":443,"protocol":"vless","speed_mbps":55.2}]`))
+	})
+
+	mux.HandleFunc("/api/viberoxy/wans/0/drop", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"replaced","wan":{"index":0,"state":"active","speed_mbps":73.5}}`))
+	})
+
+	mux.HandleFunc("/api/viberoxy/cycle/trigger", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		w.Write([]byte(`{"status":"accepted","queued":true}`))
+	})
 	return httptest.NewServer(mux)
 }
 
@@ -326,5 +364,140 @@ func TestHandlerOverview_DaemonDown(t *testing.T) {
 	vxOut := out["viberoxy"].(map[string]interface{})
 	if vxOut["reachable"] != false {
 		t.Error("viberoxy.reachable = true, want false (daemon down)")
+	}
+}
+
+func TestHandlerWANSlots(t *testing.T) {
+	store := newTestStore(t)
+	h := NewHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/viberoxy/wans", nil)
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/viberoxy/wans = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var rawSlots []map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rawSlots); err != nil {
+		t.Fatalf("decode raw response: %v (body=%s)", err, rec.Body.String())
+	}
+	if len(rawSlots) != 1 {
+		t.Fatalf("got %d slots, want 1", len(rawSlots))
+	}
+	if rawSlots[0]["state"] != "active" {
+		t.Errorf("slot 0 state = %v, want active", rawSlots[0]["state"])
+	}
+	if rawSlots[0]["exit_ip"] != "203.0.113.1" {
+		t.Errorf("slot 0 exit_ip = %v, want 203.0.113.1", rawSlots[0]["exit_ip"])
+	}
+}
+
+func TestHandlerCandidates(t *testing.T) {
+	store := newTestStore(t)
+	h := NewHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/viberoxy/candidates", nil)
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/viberoxy/candidates = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var candidates []map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &candidates); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, rec.Body.String())
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(candidates))
+	}
+	if candidates[0]["server"] != "1.2.3.4" {
+		t.Errorf("candidate 0 server = %v, want 1.2.3.4", candidates[0]["server"])
+	}
+}
+
+func TestHandlerDropWAN(t *testing.T) {
+	store := newTestStore(t)
+	h := NewHandler(store)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/viberoxy/wans/0/drop", nil)
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/viberoxy/wans/0/drop = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["status"] != "replaced" {
+		t.Errorf("status = %v, want replaced", resp["status"])
+	}
+	wan, ok := resp["wan"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("wan missing in response")
+	}
+	if wan["speed_mbps"] != float64(73.5) {
+		t.Errorf("wan.speed_mbps = %v, want 73.5", wan["speed_mbps"])
+	}
+}
+
+func TestHandlerDropWAN_InvalidIndex(t *testing.T) {
+	store := newTestStore(t)
+	h := NewHandler(store)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/viberoxy/wans/abc/drop", nil)
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /api/viberoxy/wans/abc/drop = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandlerDropWAN_MethodNotAllowed(t *testing.T) {
+	store := newTestStore(t)
+	h := NewHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/viberoxy/wans/0/drop", nil)
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /api/viberoxy/wans/0/drop = %d, want 405", rec.Code)
+	}
+}
+
+func TestHandlerTriggerCycle(t *testing.T) {
+	store := newTestStore(t)
+	h := NewHandler(store)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/viberoxy/cycle/trigger", nil)
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("POST /api/viberoxy/cycle/trigger = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["status"] != "accepted" {
+		t.Errorf("status = %v, want accepted", resp["status"])
+	}
+}
+
+func TestHandlerTriggerCycle_MethodNotAllowed(t *testing.T) {
+	store := newTestStore(t)
+	h := NewHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/viberoxy/cycle/trigger", nil)
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /api/viberoxy/cycle/trigger = %d, want 405", rec.Code)
 	}
 }

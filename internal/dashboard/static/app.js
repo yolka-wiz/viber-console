@@ -1,367 +1,582 @@
-/* viber-console SPA — vanilla JS, no dependencies */
+/* viber-console dashboard — vanilla JS, no dependencies */
 "use strict";
 
 const POLL_MS = 10000;
+const STALE_AFTER_MS = 30000;
+const SLIDER_KEYS = new Set([
+  "DAEMON_PARALLEL", "WAN_COUNT", "MAX_TEST_PER_CYCLE",
+  "WAN_FAIL_THRESHOLD", "STABILITY_PROBES",
+]);
+
 const state = {
   overview: null,
+  wans: [],
+  services: [],
+  candidates: [],
   schema: null,
   values: null,
-  configs: null,
   group: "viberayd",
-  configsTimer: null,
+  loadedAt: null,
+  loading: false,
+  advancedLoaded: false,
+  dropping: new Set(),
+  restarting: new Set(),
 };
 
-const $ = (sel) => document.querySelector(sel);
+const $ = (selector) => document.querySelector(selector);
+const $$ = (selector) => document.querySelectorAll(selector);
 
 /* ---------- helpers ---------- */
 
-async function api(path, opts) {
-  const res = await fetch(path, opts);
-  if (!res.ok) {
-    let msg = res.statusText;
-    try {
-      const j = await res.json();
-      if (j.error) msg = j.error;
-    } catch (_) {}
-    throw new Error(msg || `HTTP ${res.status}`);
+async function api(path, options = {}) {
+  const opts = { ...options };
+  opts.headers = { Accept: "application/json", ...(options.headers || {}) };
+  const response = await fetch(path, opts);
+  const text = await response.text();
+  let body = null;
+  if (text) {
+    try { body = JSON.parse(text); } catch (_) { body = null; }
   }
-  return res.json();
+  if (!response.ok) {
+    const message = body?.error || body?.message || text || response.statusText || `HTTP ${response.status}`;
+    throw new Error(message);
+  }
+  return body;
 }
 
-function fmt(n) {
-  if (n == null || isNaN(n)) return "–";
-  return new Intl.NumberFormat().format(n);
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
 }
 
-function fmtMs(s) {
-  if (s == null || isNaN(s) || s <= 0) return "–";
-  return s >= 1 ? s.toFixed(2) + "s" : Math.round(s * 1000) + "ms";
+function finiteNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
 }
 
-function stateClass(st) {
-  if (st === "working") return "ok";
-  if (st === "unreachable") return "err";
-  return "warn";
+function fmt(value, digits = 0) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "–";
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: digits }).format(number);
 }
 
-function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function relativeTime(value, now = Date.now()) {
+  if (!value) return "never";
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) return "unknown";
+  const seconds = Math.round((time - now) / 1000);
+  const absolute = Math.abs(seconds);
+  if (absolute < 5) return "just now";
+  const units = [
+    [31536000, "year"], [2592000, "month"], [86400, "day"],
+    [3600, "hour"], [60, "minute"], [1, "second"],
+  ];
+  for (const [size, label] of units) {
+    if (absolute >= size) {
+      const count = Math.round(absolute / size);
+      return seconds < 0
+        ? `${count} ${label}${count === 1 ? "" : "s"} ago`
+        : `in ${count} ${label}${count === 1 ? "" : "s"}`;
+    }
+  }
+  return "just now";
+}
+
+function isStale(value, threshold = STALE_AFTER_MS) {
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) && Date.now() - time > threshold;
 }
 
 let toastTimer = null;
-function toast(msg, kind) {
-  const el = $("#toast");
-  el.textContent = msg;
-  el.className = "toast " + (kind || "");
-  el.hidden = false;
+function toast(message, kind = "") {
+  const element = $("#toast");
+  if (!element) return;
+  element.textContent = message;
+  element.className = `toast ${kind}`;
+  element.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (el.hidden = true), 3500);
+  toastTimer = setTimeout(() => { element.hidden = true; }, 4000);
+}
+
+function setBusy(button, busy, label) {
+  if (!button) return;
+  if (busy) {
+    button.dataset.previousLabel = button.textContent;
+    button.textContent = label;
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+  } else {
+    button.textContent = button.dataset.previousLabel || button.textContent;
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+  }
 }
 
 /* ---------- theme ---------- */
 
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
-  $("#theme-toggle").textContent = theme === "dark" ? "🌙" : "☀️";
+  const button = $("#theme-toggle");
+  if (button) button.textContent = theme === "dark" ? "🌙" : "☀️";
 }
 
 function initTheme() {
   const saved = localStorage.getItem("viber-theme");
   const preferred = saved || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
   applyTheme(preferred);
-  $("#theme-toggle").addEventListener("click", () => {
+  $("#theme-toggle")?.addEventListener("click", () => {
     const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
     localStorage.setItem("viber-theme", next);
     applyTheme(next);
   });
 }
 
-/* ---------- overview ---------- */
+/* ---------- primary dashboard data ---------- */
 
-async function loadOverview() {
-  try {
-    const o = await api("/api/overview");
-    state.overview = o;
+function renderInitialLoading() {
+  $("#status-label").textContent = "Loading proxy status…";
+  $("#summary-text").textContent = "Fetching WANs and services…";
+  $("#wan-list").innerHTML = '<div class="empty-state" aria-busy="true">Loading WANs…</div>';
+  $("#service-list").innerHTML = '<div class="empty-state" aria-busy="true">Loading services…</div>';
+  $("#subscription-text").textContent = "Loading subscription…";
+}
 
-    const vd = o.viberayd || {};
-    const vx = o.viberoxy || {};
+async function loadDashboard({ quiet = false } = {}) {
+  if (state.loading) return;
+  state.loading = true;
+  const refresh = $("#refresh");
+  if (!quiet) setBusy(refresh, true, "…");
 
-    $("#stat-working").textContent = fmt(vd.stats?.working);
-    $("#stat-failed").textContent = fmt(vd.stats?.failed);
-    $("#stat-wans").textContent = fmt(vx.wans?.active);
-    $("#stat-p50").textContent = fmtMs(vx.proxy?.latency_p50_s);
+  const results = await Promise.allSettled([
+    api("/api/overview"),
+    api("/api/viberoxy/wans"),
+    api("/api/processes"),
+    api("/api/viberoxy/candidates"),
+  ]);
 
-    setPill("#pill-viberayd", vd.reachable, vd.reachable ? "● viberayd up" : "● viberayd down");
-    setPill("#pill-viberoxy", vx.reachable, vx.reachable ? "● viberoxy up" : "● viberoxy down");
+  const [overviewResult, wansResult, processesResult, candidatesResult] = results;
+  if (overviewResult.status === "fulfilled") state.overview = overviewResult.value;
+  if (wansResult.status === "fulfilled") state.wans = normalizeWANs(wansResult.value);
+  if (processesResult.status === "fulfilled") state.services = normalizeServices(processesResult.value);
+  if (candidatesResult.status === "fulfilled") state.candidates = normalizeCandidates(candidatesResult.value);
 
-    renderDaemonStatus(vd, vx);
-    renderWANs(vx);
-    $("#last-updated").textContent = "updated " + new Date(o.generated_at).toLocaleTimeString();
-  } catch (e) {
-    toast("overview failed: " + e.message, "err");
+  if (overviewResult.status === "fulfilled") state.loadedAt = new Date();
+  renderDashboard();
+
+  const failures = results.filter((result) => result.status === "rejected");
+  if (failures.length && !quiet) {
+    const first = failures[0].reason?.message || "request failed";
+    toast(`${failures.length} dashboard request${failures.length === 1 ? "" : "s"} failed: ${first}`, "err");
   }
+  state.loading = false;
+  if (!quiet) setBusy(refresh, false);
 }
 
-function setPill(sel, ok, text) {
-  const el = $(sel);
-  el.textContent = text;
-  el.className = "pill " + (ok ? "ok" : "err");
+function normalizeWANs(payload) {
+  const list = Array.isArray(payload) ? payload : (payload?.wans || payload?.slots || []);
+  return list.map((slot, position) => ({
+    index: Number.isInteger(Number(slot.index)) ? Number(slot.index) : position,
+    state: String(slot.state || (finiteNumber(slot.speed_mbps) > 0 ? "active" : "empty")).toLowerCase(),
+    speed_mbps: finiteNumber(slot.speed_mbps),
+    conns: finiteNumber(slot.conns),
+    exit_ip: slot.exit_ip || "",
+    last_probe: slot.last_probe || "",
+    consecutive_fails: finiteNumber(slot.consecutive_fails),
+  })).sort((a, b) => a.index - b.index);
 }
 
-function renderDaemonStatus(vd, vx) {
-  const el = $("#daemon-status");
-  const vdCard = `
-    <div class="card">
-      <strong>viberayd</strong>
-      <div class="muted">${vd.reachable ? "reachable" : "unreachable"}</div>
-      ${vd.stats ? `<div class="muted">${fmt(vd.stats.working)} working / ${fmt(vd.stats.total)} total</div>` : ""}
-      ${vd.sub_url ? `<div class="muted">sub: ${esc(vd.sub_url)}</div>` : ""}
-    </div>`;
-  const vxCard = `
-    <div class="card">
-      <strong>viberoxy</strong>
-      <div class="muted">${vx.reachable ? "reachable" : "unreachable"}</div>
-      ${vx.health ? `<div class="muted">healthz: ${esc(vx.health.healthz)} · readyz: ${esc(vx.health.readyz)}</div>` : ""}
-      ${vx.proxy ? `<div class="muted">${fmt(vx.proxy.connections_total)} conns · up ${fmt(vx.proxy.bytes_up)}B · down ${fmt(vx.proxy.bytes_down)}B</div>` : ""}
-    </div>`;
-  el.innerHTML = vdCard + vxCard;
+function normalizeServices(payload) {
+  return Array.isArray(payload) ? payload : (payload?.services || []);
+}
+
+function normalizeCandidates(payload) {
+  return Array.isArray(payload) ? payload : (payload?.candidates || []);
+}
+
+function renderDashboard() {
+  const overview = state.overview || {};
+  const viberayd = overview.viberayd || {};
+  const viberoxy = overview.viberoxy || {};
+  const activeWANs = state.wans.filter((wan) => wan.state === "active");
+  const totalSpeed = activeWANs.reduce((total, wan) => total + wan.speed_mbps, 0);
+  const working = finiteNumber(viberayd.stats?.working);
+  const proxyOK = Boolean(viberoxy.reachable) && activeWANs.length > 0;
+  const proxyDegraded = Boolean(viberoxy.reachable) && !proxyOK;
+
+  const statusDot = $("#status-dot");
+  statusDot.className = `status-dot ${proxyOK ? "" : (proxyDegraded ? "warn" : "err")}`.trim();
+  $("#status-label").textContent = proxyOK ? "Proxy is working" : (proxyDegraded ? "Proxy is degraded" : "Proxy is unavailable");
+  $("#summary-text").textContent = `${fmt(totalSpeed, 1)} Mb/s · ${activeWANs.length} WAN${activeWANs.length === 1 ? "" : "s"} · ${fmt(working)} working configs`;
+
+  renderWANs(state.wans, viberoxy.reachable);
+  renderServices(state.services, { viberayd, viberoxy });
+  renderSubscription(viberayd.stats || {});
+  updateRelativeTimestamps();
 }
 
 /* ---------- WANs ---------- */
 
-function renderWANs(vx) {
-  const el = $("#wan-grid");
-  const slots = vx.wans?.slots || [];
-  if (!slots.length) {
-    el.innerHTML = `<div class="empty-state">No WAN slots${vx.reachable ? "" : " (viberoxy unreachable)"}</div>`;
+function wanVisualState(wan) {
+  if (state.dropping.has(wan.index) || ["testing", "replacing", "draining"].includes(wan.state)) return "warn";
+  if (wan.state === "empty") return "empty";
+  if (wan.state !== "active" || wan.consecutive_fails > 0) return wan.consecutive_fails > 1 ? "err" : "warn";
+  return "ok";
+}
+
+function renderWANs(wans, reachable = true) {
+  const element = $("#wan-list");
+  if (!wans.length) {
+    element.innerHTML = `<div class="empty-state">${reachable ? "No WAN slots are configured." : "WAN data unavailable — viberoxy is unreachable."}</div>`;
     return;
   }
-  el.innerHTML = slots.map((s) => {
-    const protoTags = Object.entries(s.proto_conns || {})
-      .map(([p, c]) => `<span class="tag">${esc(p)}:${c}</span>`).join(" ");
-    const stab = s.stability > 0 ? `<span class="tag">stability ${s.stability}</span>` : "";
+  const maxSpeed = Math.max(...wans.map((wan) => wan.speed_mbps), 1);
+  element.innerHTML = wans.map((wan) => {
+    const visual = wanVisualState(wan);
+    const dropping = state.dropping.has(wan.index);
+    const canDrop = ["active", "draining"].includes(wan.state) && !dropping;
+    const width = wan.speed_mbps > 0 ? Math.max(4, Math.round((wan.speed_mbps / maxSpeed) * 100)) : 0;
+    const probe = wan.last_probe ? relativeTime(wan.last_probe) : "not probed";
+    const stale = wan.last_probe && isStale(wan.last_probe, Math.max(STALE_AFTER_MS, POLL_MS * 6));
+    const details = [
+      wan.exit_ip ? `Exit ${esc(wan.exit_ip)}` : "Exit IP unknown",
+      `${fmt(wan.conns)} connection${wan.conns === 1 ? "" : "s"}`,
+      `${stale ? "⚠ stale · " : ""}probed ${esc(probe)}`,
+    ];
+    if (wan.consecutive_fails) details.push(`${fmt(wan.consecutive_fails)} failed probe${wan.consecutive_fails === 1 ? "" : "s"}`);
     return `
-      <div class="card wan-card">
-        <div class="wan-name"><span>WAN ${s.index}</span>${stab}</div>
-        <div class="wan-speed">${s.speed_mbps ? fmt(s.speed_mbps) : "–"} Mb/s</div>
-        <div class="wan-meta">${fmt(s.conns)} connections</div>
-        <div class="wan-meta">${protoTags}</div>
+      <article class="wan-row" data-wan-index="${wan.index}">
+        <div class="wan-header">
+          <span class="wan-name">WAN ${wan.index} · ${esc(dropping ? "replacing" : wan.state)}</span>
+          <span class="wan-speed">${wan.speed_mbps > 0 ? `${fmt(wan.speed_mbps, 1)} Mb/s` : "empty"}</span>
+        </div>
+        <div class="wan-bar-container" role="meter" aria-label="WAN ${wan.index} speed" aria-valuemin="0" aria-valuemax="${maxSpeed}" aria-valuenow="${wan.speed_mbps}">
+          <div class="wan-bar ${visual === "ok" ? "" : visual}" style="width:${visual === "empty" ? 100 : width}%"></div>
+        </div>
+        <div class="wan-header">
+          <span class="wan-speed">${details.join(" · ")}</span>
+          <button class="btn danger small wan-drop" data-index="${wan.index}" ${canDrop ? "" : "disabled"}>${dropping ? "Replacing…" : "Drop"}</button>
+        </div>
+      </article>`;
+  }).join("");
+
+  element.querySelectorAll?.(".wan-drop").forEach((button) => {
+    button.addEventListener("click", () => dropWAN(Number(button.dataset.index)));
+  });
+}
+
+async function dropWAN(index) {
+  const wan = state.wans.find((slot) => slot.index === index);
+  if (!wan || state.dropping.has(index)) return;
+  const detail = wan.exit_ip ? ` (${wan.exit_ip})` : "";
+  if (!window.confirm(`Drop WAN ${index}${detail} and replace its proxy configuration? Active connections on this WAN may be interrupted.`)) return;
+
+  state.dropping.add(index);
+  renderWANs(state.wans, state.overview?.viberoxy?.reachable);
+  try {
+    const response = await api(`/api/viberoxy/wans/${index}/drop`, { method: "POST" });
+    if (response?.wan) {
+      const replacement = normalizeWANs([response.wan])[0];
+      state.wans = state.wans.map((slot) => slot.index === index ? replacement : slot);
+    } else if (response?.status === "replacing") {
+      state.wans = state.wans.map((slot) => slot.index === index ? { ...slot, state: "replacing", speed_mbps: 0, exit_ip: "" } : slot);
+    }
+    toast(response?.message || (response?.status === "replaced" ? `WAN ${index} replaced` : `WAN ${index} replacement started`), "ok");
+  } catch (error) {
+    toast(`WAN ${index} drop failed: ${error.message}`, "err");
+  } finally {
+    state.dropping.delete(index);
+    renderDashboard();
+    window.setTimeout(() => loadDashboard({ quiet: true }), 1500);
+  }
+}
+
+/* ---------- services and subscription ---------- */
+
+function renderServices(services, fallback) {
+  const byName = new Map(services.map((service) => [service.name, service]));
+  const rows = ["viberoxy", "viberayd"].map((name) => {
+    const service = byName.get(name);
+    const reachable = Boolean(fallback[name]?.reachable);
+    return service || { name, running: reachable, externally_managed: true };
+  });
+  $("#service-list").innerHTML = rows.map((service) => {
+    const busy = state.restarting.has(service.name);
+    const running = Boolean(service.running);
+    const status = busy ? "Restarting…" : (running ? "Running" : "Stopped");
+    const extra = running && service.uptime_sec ? ` · up ${formatDuration(service.uptime_sec)}` : "";
+    return `
+      <div class="service-row">
+        <div class="service-info">
+          <span class="service-dot ${busy ? "starting" : (running ? "running" : "stopped")}"></span>
+          <span><span class="service-name">${esc(service.name)}</span><br><span class="service-status">${status}${extra}</span></span>
+        </div>
+        <button class="btn ghost small service-restart" data-service="${esc(service.name)}" ${busy ? "disabled" : ""}>${busy ? "Restarting…" : "Restart"}</button>
       </div>`;
   }).join("");
+  $("#service-list").querySelectorAll?.(".service-restart").forEach((button) => {
+    button.addEventListener("click", () => restartService(button.dataset.service));
+  });
 }
 
-/* ---------- configs ---------- */
+function formatDuration(seconds) {
+  const value = Math.max(0, finiteNumber(seconds));
+  if (value < 60) return `${Math.floor(value)}s`;
+  if (value < 3600) return `${Math.floor(value / 60)}m`;
+  if (value < 86400) return `${Math.floor(value / 3600)}h`;
+  return `${Math.floor(value / 86400)}d`;
+}
 
-async function loadConfigs() {
-  const filter = $("#state-filter").value;
-  const q = $("#search").value.trim().toLowerCase();
+async function restartService(service) {
+  if (state.restarting.has(service)) return;
+  if (!window.confirm(`Restart ${service}? Connections may be interrupted briefly.`)) return;
+  state.restarting.add(service);
+  renderDashboard();
   try {
-    const p = await api("/api/viberayd/configs?page=1&per_page=100" + (filter ? "&state=" + encodeURIComponent(filter) : ""));
-    let list = p.configs || [];
-    if (q) list = list.filter((c) => (c.host || "").toLowerCase().includes(q));
-    renderConfigs(list);
-  } catch (e) {
-    $("#config-list").innerHTML = `<div class="empty-state">configs unavailable: ${esc(e.message)}</div>`;
+    const response = await api("/api/control/restart", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ service }),
+    });
+    const restarted = response?.restarted || [];
+    if (!restarted.includes(service)) throw new Error(`${service} is not managed by viber-console`);
+    toast(`${service} restarted`, "ok");
+  } catch (error) {
+    toast(`Restart failed: ${error.message}`, "err");
+  } finally {
+    state.restarting.delete(service);
+    renderDashboard();
+    window.setTimeout(() => loadDashboard({ quiet: true }), 1500);
   }
 }
 
-function renderConfigs(list) {
-  const el = $("#config-list");
-  if (!list.length) {
-    el.innerHTML = `<div class="empty-state">No configs match.</div>`;
+function renderSubscription(stats) {
+  const total = finiteNumber(stats.total);
+  const working = finiteNumber(stats.working);
+  const failed = finiteNumber(stats.failed);
+  const unreachable = finiteNumber(stats.unreachable);
+  const failedTotal = failed + unreachable;
+  const candidates = state.candidates.length;
+  $("#subscription-text").textContent = `${fmt(total)} URLs · ${fmt(working)} working · ${fmt(failedTotal)} failed · ${fmt(candidates)} replacement candidates`;
+}
+
+function updateRelativeTimestamps() {
+  const timestamp = state.overview?.generated_at || state.loadedAt;
+  const footer = $("#last-updated");
+  if (!timestamp) {
+    footer.textContent = "not updated";
     return;
   }
-  el.innerHTML = list.map((c) => `
+  const stale = isStale(timestamp);
+  footer.textContent = `${stale ? "⚠ stale · " : ""}updated ${relativeTime(timestamp)}`;
+  footer.title = new Date(timestamp).toLocaleString();
+}
+
+/* ---------- advanced ---------- */
+
+async function loadAdvanced() {
+  const configs = $("#config-list");
+  const settings = $("#settings-fields");
+  configs.innerHTML = '<div class="empty-state" aria-busy="true">Loading configs…</div>';
+  settings.innerHTML = '<div class="empty-state" aria-busy="true">Loading settings…</div>';
+  await Promise.all([loadConfigs(), loadSettings()]);
+  state.advancedLoaded = true;
+}
+
+async function loadConfigs() {
+  const filter = $("#state-filter")?.value || "";
+  const query = $("#search")?.value.trim().toLowerCase() || "";
+  try {
+    const page = await api(`/api/viberayd/configs?page=1&per_page=100${filter ? `&state=${encodeURIComponent(filter)}` : ""}`);
+    let list = page?.configs || [];
+    if (query) list = list.filter((config) => `${config.host || ""}:${config.port || ""}`.toLowerCase().includes(query));
+    renderConfigs(list);
+  } catch (error) {
+    $("#config-list").innerHTML = `<div class="empty-state">Configs unavailable: ${esc(error.message)}</div>`;
+  }
+}
+
+function renderConfigs(configs) {
+  if (!configs.length) {
+    $("#config-list").innerHTML = '<div class="empty-state">No configs match.</div>';
+    return;
+  }
+  $("#config-list").innerHTML = configs.map((config) => `
     <div class="config-row">
-      <span class="host" title="${esc(c.raw || "")}">${esc(c.host || "?")}:${c.port ?? ""}</span>
-      <span class="proto muted">${esc(c.protocol || "")}</span>
-      <span class="state muted"><span class="pill ${stateClass(c.state)}">${esc(c.state || "")}</span></span>
-      <span class="muted">${c.latency_ms ? c.latency_ms + "ms" : "–"}</span>
-      <span class="muted">✓${c.success_count ?? 0} ✗${c.fail_count ?? 0}</span>
+      <span class="host" title="${esc(config.raw || "")}">${esc(config.host || "?")}:${esc(config.port || "")}</span>
+      <span class="proto muted">${esc(config.protocol || "")}</span>
+      <span class="state muted">${esc(config.state || "unknown")}</span>
+      <span class="muted">${config.latency_ms ? `${fmt(config.latency_ms)}ms` : "–"}</span>
     </div>`).join("");
 }
 
-/* ---------- settings ---------- */
-
 async function loadSettings() {
   try {
-    const [schema, values] = await Promise.all([
-      api("/api/config/schema"),
-      api("/api/config/values"),
-    ]);
+    const [schema, values] = await Promise.all([api("/api/config/schema"), api("/api/config/values")]);
     state.schema = schema;
     state.values = values;
     renderSettingsForm();
-    loadURLs();
-  } catch (e) {
-    $("#settings-fields").innerHTML = `<div class="empty-state">settings unavailable: ${esc(e.message)}</div>`;
-  }
-}
-
-/* ---- Subscription URLs (viberayd) ---- */
-
-async function loadURLs() {
-  if (state.group !== "viberayd") return;
-  try {
-    const res = await api("/api/viberayd/urls");
-    $("#urls-card").hidden = false;
-    $("#urls-textarea").value = (res.urls || []).join("\n");
-    clearURLsMsg();
-  } catch (e) {
-    // viberayd unreachable: keep the card hidden rather than showing an error
-    // that would block the settings form.
-    $("#urls-card").hidden = true;
-  }
-}
-
-function clearURLsMsg() {
-  const el = $("#urls-msg");
-  el.className = "form-msg";
-  el.textContent = "";
-}
-
-async function applyURLs() {
-  const btn = $("#urls-apply");
-  btn.disabled = true;
-  clearURLsMsg();
-  try {
-    const lines = $("#urls-textarea").value.split("\n");
-    const res = await api("/api/viberayd/urls", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ urls: lines }),
-    });
-    $("#urls-textarea").value = (res.urls || []).join("\n");
-    $("#urls-msg").className = "form-msg";
-    $("#urls-msg").textContent = "URLs applied (" + (res.urls || []).length + ")";
-    toast("Subscription URLs updated", "ok");
-  } catch (e) {
-    $("#urls-msg").className = "form-msg err";
-    $("#urls-msg").textContent = "error: " + e.message;
-    toast("URLs apply failed: " + e.message, "err");
-  } finally {
-    btn.disabled = false;
+    await loadURLs();
+  } catch (error) {
+    $("#settings-fields").innerHTML = `<div class="empty-state">Settings unavailable: ${esc(error.message)}</div>`;
   }
 }
 
 function renderSettingsForm() {
-  const fields = (state.schema.groups[state.group] || []);
-  const values = state.values[state.group] || {};
-  $("#settings-fields").innerHTML = `
-    <div class="form-grid">
-      ${fields.map(fieldHTML(fields, values)).join("")}
-    </div>`;
+  const fields = state.schema?.groups?.[state.group] || [];
+  const values = state.values?.[state.group] || {};
+  $("#settings-fields").innerHTML = `<div class="form-grid">${fields.map((field) => fieldHTML(field, values[field.key] ?? field.default ?? "")).join("")}</div>`;
+  wireProfessionalControls();
 }
 
-function fieldHTML(fields, values) {
-  return (f) => {
-    const v = values[f.key] ?? f.default ?? "";
-    const req = f.required ? '<span class="req">*</span>' : "";
-    const desc = f.description ? `<div class="desc">${esc(f.description)}</div>` : "";
-    let input;
-    if (f.type === "bool") {
-      input = `<select id="f-${f.key}" class="input" data-key="${f.key}">
-        <option value="true" ${v === "true" ? "selected" : ""}>true</option>
-        <option value="false" ${v === "false" || v === "" ? "selected" : ""}>false</option>
-      </select>`;
-    } else if (f.type === "enum") {
-      input = `<select id="f-${f.key}" class="input" data-key="${f.key}">
-        ${f.enum.map((e) => `<option value="${e}" ${v === e ? "selected" : ""}>${e}</option>`).join("")}
-      </select>`;
-    } else {
-      const type = f.type === "int" ? "number" : "text";
-      input = `<input id="f-${f.key}" class="input" type="${type}" data-key="${f.key}"
-        value="${esc(v)}" placeholder="${esc(f.placeholder || "")}"
-        ${f.min != null ? `min="${f.min}"` : ""} ${f.max != null ? `max="${f.max}"` : ""}>`;
-    }
-    return `
-      <div class="field" data-group="${f.group}">
-        <label for="f-${f.key}">${esc(f.label)} ${req}</label>
-        ${desc}
-        ${input}
-        <div class="err" id="e-${f.key}"></div>
-      </div>`;
-  };
+function fieldHTML(field, rawValue) {
+  const id = `f-${field.key}`;
+  const required = field.required ? '<span class="req">*</span>' : "";
+  const description = field.description ? `<div class="desc">${esc(field.description)}</div>` : "";
+  let input = "";
+
+  if (field.type === "bool") {
+    const checked = String(rawValue).toLowerCase() === "true";
+    input = `<label class="checkbox-label"><input id="${id}" type="checkbox" data-key="${esc(field.key)}" role="switch" ${checked ? "checked" : ""}> ${checked ? "Enabled" : "Disabled"}</label>`;
+  } else if (field.type === "enum") {
+    input = `<div>${(field.enum || []).map((choice) => `<label class="checkbox-label"><input type="radio" name="${id}" data-key="${esc(field.key)}" value="${esc(choice)}" ${String(rawValue) === choice ? "checked" : ""}> ${esc(choice)}</label>`).join("")}</div>`;
+  } else if (field.type === "int" && SLIDER_KEYS.has(field.key) && field.min != null && field.max != null) {
+    input = `<div><input id="${id}" class="input" type="range" data-key="${esc(field.key)}" value="${esc(rawValue)}" min="${field.min}" max="${field.max}" aria-describedby="${id}-value"><output id="${id}-value">${esc(rawValue)}</output></div>`;
+  } else {
+    const type = field.type === "int" ? "number" : (field.secret ? "password" : "text");
+    input = `<input id="${id}" class="input" type="${type}" data-key="${esc(field.key)}" value="${esc(rawValue)}" placeholder="${esc(field.placeholder || "")}" ${field.min != null ? `min="${field.min}"` : ""} ${field.max != null ? `max="${field.max}"` : ""}>`;
+  }
+
+  return `<div class="field"><label for="${id}">${esc(field.label)} ${required}</label>${description}${input}<div class="err" id="e-${field.key}"></div></div>`;
+}
+
+function wireProfessionalControls() {
+  $$('#settings-fields input[type="range"]').forEach((input) => {
+    input.addEventListener("input", () => { $(`#${input.id}-value`).textContent = input.value; });
+  });
+  $$('#settings-fields input[type="checkbox"][role="switch"]').forEach((input) => {
+    input.addEventListener("change", () => { input.parentElement.lastChild.textContent = input.checked ? " Enabled" : " Disabled"; });
+  });
 }
 
 function collectFormValues() {
-  const out = {};
-  document.querySelectorAll("#settings-fields [data-key]").forEach((el) => {
-    out[el.dataset.key] = el.value;
+  const values = {};
+  $$('#settings-fields [data-key]').forEach((input) => {
+    if (input.type === "radio" && !input.checked) return;
+    values[input.dataset.key] = input.type === "checkbox" ? String(input.checked) : input.value;
   });
-  return out;
+  return values;
 }
 
-async function saveSettings(ev) {
-  ev.preventDefault();
-  const btn = $('button[type="submit"]');
-  btn.disabled = true;
+async function saveSettings(event) {
+  event.preventDefault();
+  const button = $('#settings-form button[type="submit"]');
+  setBusy(button, true, "Saving…");
   $("#form-msg").className = "form-msg";
-  $("#form-msg").textContent = "saving…";
+  $("#form-msg").textContent = "Saving configuration…";
   try {
-    const res = await api("/api/config/values", {
+    const response = await api("/api/config/values", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        group: state.group,
-        values: collectFormValues(),
-        restart: $("#restart-check").checked,
-      }),
+      body: JSON.stringify({ group: state.group, values: collectFormValues(), restart: $("#restart-check").checked }),
     });
-    const parts = [`saved ${res.path || ""}`];
-    if (res.restarted && res.restarted.length) parts.push("restarted " + res.restarted.join(", "));
-    $("#form-msg").className = "form-msg";
-    $("#form-msg").textContent = parts.join(" · ");
-    toast("Configuration saved" + (res.restarted?.length ? " & restarted" : ""), "ok");
+    const restarted = response?.restarted?.length ? ` · restarted ${response.restarted.join(", ")}` : "";
+    $("#form-msg").textContent = `Saved${restarted}`;
+    toast("Configuration saved", "ok");
     await loadSettings();
-    setTimeout(loadOverview, 1200); // let daemons come back
-  } catch (e) {
+    window.setTimeout(() => loadDashboard({ quiet: true }), 1500);
+  } catch (error) {
     $("#form-msg").className = "form-msg err";
-    $("#form-msg").textContent = "error: " + e.message;
-    toast("save failed: " + e.message, "err");
+    $("#form-msg").textContent = `Error: ${error.message}`;
+    toast(`Save failed: ${error.message}`, "err");
   } finally {
-    btn.disabled = false;
+    setBusy(button, false);
+  }
+}
+
+async function loadURLs() {
+  if (state.group !== "viberayd") {
+    $("#urls-card").hidden = true;
+    return;
+  }
+  try {
+    const response = await api("/api/viberayd/urls");
+    $("#urls-card").hidden = false;
+    $("#urls-textarea").value = (response?.urls || []).join("\n");
+    $("#urls-msg").textContent = "";
+  } catch (_) {
+    $("#urls-card").hidden = true;
+  }
+}
+
+async function applyURLs() {
+  const button = $("#urls-apply");
+  setBusy(button, true, "Applying…");
+  try {
+    const response = await api("/api/viberayd/urls", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ urls: $("#urls-textarea").value.split("\n") }),
+    });
+    $("#urls-textarea").value = (response?.urls || []).join("\n");
+    $("#urls-msg").className = "form-msg";
+    $("#urls-msg").textContent = `${response?.urls?.length || 0} URLs applied`;
+    toast("Subscription URLs updated", "ok");
+  } catch (error) {
+    $("#urls-msg").className = "form-msg err";
+    $("#urls-msg").textContent = `Error: ${error.message}`;
+    toast(`URL update failed: ${error.message}`, "err");
+  } finally {
+    setBusy(button, false);
   }
 }
 
 /* ---------- boot ---------- */
 
+function debounce(fn, delay) {
+  let timer;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), delay);
+  };
+}
+
 function init() {
   initTheme();
+  renderInitialLoading();
 
-  $("#refresh").addEventListener("click", () => {
-    loadOverview();
-    loadConfigs();
+  $("#refresh").addEventListener("click", () => loadDashboard());
+  $("#advanced-toggle").addEventListener("click", async () => {
+    const content = $("#advanced-content");
+    const expanded = $("#advanced-toggle").getAttribute("aria-expanded") === "true";
+    $("#advanced-toggle").setAttribute("aria-expanded", String(!expanded));
+    $("#advanced-chevron").classList.toggle("open", !expanded);
+    content.hidden = expanded;
+    if (!expanded && !state.advancedLoaded) await loadAdvanced();
   });
   $("#state-filter").addEventListener("change", loadConfigs);
   $("#search").addEventListener("input", debounce(loadConfigs, 250));
   $("#settings-form").addEventListener("submit", saveSettings);
   $("#urls-apply").addEventListener("click", applyURLs);
 
-  document.querySelectorAll(".tab").forEach((tab) => {
-    tab.addEventListener("click", () => {
-      document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
-      tab.classList.add("active");
-      state.group = tab.dataset.group;
-      renderSettingsForm();
-      loadURLs(); // shows the URLs card only on the viberayd tab
-    });
-  });
+  $$(".tab").forEach((tab) => tab.addEventListener("click", () => {
+    $$(".tab").forEach((item) => item.classList.remove("active"));
+    tab.classList.add("active");
+    state.group = tab.dataset.group;
+    renderSettingsForm();
+    loadURLs();
+  }));
 
-  loadOverview();
-  loadConfigs();
-  loadSettings();
-
-  setInterval(() => {
-    loadOverview();
-    if (!document.hidden) loadConfigs();
+  loadDashboard();
+  window.setInterval(() => {
+    updateRelativeTimestamps();
+    if (!document.hidden) loadDashboard({ quiet: true });
   }, POLL_MS);
 }
 
-function debounce(fn, ms) {
-  let t;
-  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+// A small public surface makes the dependency-free smoke test possible without
+// changing runtime behavior.
+if (typeof window !== "undefined") {
+  window.ViberConsole = { api, relativeTime, normalizeWANs, wanVisualState, renderWANs };
 }
 
 document.addEventListener("DOMContentLoaded", init);

@@ -46,3 +46,49 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 	}
 	return body, nil
 }
+
+// GetRaw fetches a URL and returns the raw response (body, status code, error).
+// Unlike Get, it does not treat non-2xx as an error so callers can proxy the
+// upstream status through.
+func (c *Client) GetRaw(ctx context.Context, url string) ([]byte, int, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("build request: %w", err)
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("get %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("read %s: %w", url, err)
+	}
+	return body, resp.StatusCode, nil
+}
+
+// Post sends an empty POST and returns the raw response (body, status code, error).
+func (c *Client) Post(ctx context.Context, url string) ([]byte, int, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("build request: %w", err)
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("post %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("read %s: %w", url, err)
+	}
+	return body, resp.StatusCode, nil
+}

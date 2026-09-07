@@ -27,6 +27,10 @@ func (h *Handler) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/viberayd/configs", h.handleViberaydConfigs)
 	mux.HandleFunc("/api/viberayd/urls", h.handleViberaydURLs)
 	mux.HandleFunc("/api/viberoxy/metrics", h.handleViberoxyMetrics)
+	mux.HandleFunc("/api/viberoxy/wans", h.handleWANSlots)
+	mux.HandleFunc("/api/viberoxy/candidates", h.handleCandidates)
+	mux.HandleFunc("/api/viberoxy/cycle/trigger", h.handleTriggerCycle)
+	mux.HandleFunc("/api/viberoxy/wans/", h.handleDropWAN)
 	return mux
 }
 
@@ -174,4 +178,95 @@ func (h *Handler) handleViberoxyMetrics(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, snap.Viberoxy)
+}
+
+// handleWANSlots proxies viberoxy's per-slot WAN state endpoint.
+func (h *Handler) handleWANSlots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	body, status, err := h.store.FetchWANSlots(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error":   "viberoxy unreachable",
+			"details": err.Error(),
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	w.Write(body)
+}
+
+// handleCandidates proxies viberoxy's candidate pool endpoint.
+func (h *Handler) handleCandidates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	body, status, err := h.store.FetchCandidates(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error":   "viberoxy unreachable",
+			"details": err.Error(),
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	w.Write(body)
+}
+
+// handleDropWAN proxies viberoxy's WAN drop endpoint. The URL path must be
+// /api/viberoxy/wans/{index}/drop — the index is parsed from the trailing
+// segment by stripping the /api/viberoxy/wans/ prefix and /drop suffix.
+func (h *Handler) handleDropWAN(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	// Path: /api/viberoxy/wans/{index}/drop
+	prefix := "/api/viberoxy/wans/"
+	if !strings.HasPrefix(r.URL.Path, prefix) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, prefix)
+	rest = strings.TrimSuffix(rest, "/drop")
+	index, err := strconv.Atoi(rest)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid WAN index"})
+		return
+	}
+	body, status, err := h.store.DropWAN(r.Context(), index)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error":   "viberoxy unreachable",
+			"details": err.Error(),
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	w.Write(body)
+}
+
+// handleTriggerCycle proxies viberoxy's manual cycle trigger endpoint.
+func (h *Handler) handleTriggerCycle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	body, status, err := h.store.TriggerCycle(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error":   "viberoxy unreachable",
+			"details": err.Error(),
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	w.Write(body)
 }
