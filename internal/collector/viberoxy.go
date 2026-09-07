@@ -6,26 +6,36 @@ import (
 	"time"
 )
 
-// ViberoxyClient polls the Viberoxy metrics + health endpoints. Viberoxy has
-// no JSON API — everything comes from Prometheus text format.
+// ViberoxyClient polls Viberoxy's observability and control endpoints.
+// Metrics/health and the control API may be served on different listeners.
 type ViberoxyClient struct {
-	client *Client
-	url    string
+	client     *Client
+	metricsURL string
+	apiURL     string
 }
 
+// NewViberoxyClient keeps the original single-listener behavior for callers
+// that expose observability and control routes on one base URL.
 func NewViberoxyClient(url string, timeout time.Duration) *ViberoxyClient {
+	return NewViberoxyClientWithAPI(url, url, timeout)
+}
+
+// NewViberoxyClientWithAPI configures the observability and control listeners
+// independently. Viberoxy serves these on separate ports by default.
+func NewViberoxyClientWithAPI(metricsURL, apiURL string, timeout time.Duration) *ViberoxyClient {
 	return &ViberoxyClient{
-		client: NewClient(timeout),
-		url:    url,
+		client:     NewClient(timeout),
+		metricsURL: metricsURL,
+		apiURL:     apiURL,
 	}
 }
 
 // WANSlot is the per-slot view extracted from viberoxy metrics.
 type WANSlot struct {
-	Index      int     `json:"index"`
-	SpeedMbps  float64 `json:"speed_mbps"`
-	Stability  int     `json:"stability"`
-	Conns      int64   `json:"conns"`
+	Index      int              `json:"index"`
+	SpeedMbps  float64          `json:"speed_mbps"`
+	Stability  int              `json:"stability"`
+	Conns      int64            `json:"conns"`
 	ProtoConns map[string]int64 `json:"proto_conns,omitempty"`
 }
 
@@ -41,16 +51,16 @@ type ViberoxyProxy struct {
 
 // ViberoxySnapshot is the full parsed view of one /metrics fetch.
 type ViberoxySnapshot struct {
-	WansActive   int        `json:"wans_active"`
-	Slots        []WANSlot  `json:"slots"`
+	WansActive   int           `json:"wans_active"`
+	Slots        []WANSlot     `json:"slots"`
 	Proxy        ViberoxyProxy `json:"proxy"`
-	BuildVersion string     `json:"build_version,omitempty"`
+	BuildVersion string        `json:"build_version,omitempty"`
 }
 
 // FetchMetrics pulls /metrics, parses Prometheus text, and builds the
 // dashboard view.
 func (v *ViberoxyClient) FetchMetrics(ctx context.Context) (ViberoxySnapshot, error) {
-	body, err := v.client.Get(ctx, v.url+"/metrics")
+	body, err := v.client.Get(ctx, v.metricsURL+"/metrics")
 	if err != nil {
 		return ViberoxySnapshot{}, err
 	}
@@ -146,14 +156,14 @@ func (v *ViberoxyClient) FetchMetrics(ctx context.Context) (ViberoxySnapshot, er
 // /api/viberoxy/wans endpoint and returns the raw JSON body along with the
 // upstream HTTP status code. Errors indicate transport-level failures.
 func (v *ViberoxyClient) FetchWANSlots(ctx context.Context) ([]byte, int, error) {
-	return v.client.GetRaw(ctx, v.url+"/api/viberoxy/wans")
+	return v.client.GetRaw(ctx, v.apiURL+"/api/viberoxy/wans")
 }
 
 // FetchCandidates fetches the candidate pool from viberoxy's
 // /api/viberoxy/candidates endpoint and returns the raw JSON body along with
 // the upstream HTTP status code. Errors indicate transport-level failures.
 func (v *ViberoxyClient) FetchCandidates(ctx context.Context) ([]byte, int, error) {
-	return v.client.GetRaw(ctx, v.url+"/api/viberoxy/candidates")
+	return v.client.GetRaw(ctx, v.apiURL+"/api/viberoxy/candidates")
 }
 
 // DropWAN sends a drop request to viberoxy's
@@ -161,7 +171,7 @@ func (v *ViberoxyClient) FetchCandidates(ctx context.Context) ([]byte, int, erro
 // along with the upstream HTTP status code. Errors indicate transport-level
 // failures; application-level errors are reflected in the status code.
 func (v *ViberoxyClient) DropWAN(ctx context.Context, index int) ([]byte, int, error) {
-	return v.client.Post(ctx, v.url+"/api/viberoxy/wans/"+strconv.Itoa(index)+"/drop")
+	return v.client.Post(ctx, v.apiURL+"/api/viberoxy/wans/"+strconv.Itoa(index)+"/drop")
 }
 
 // TriggerCycle sends a manual cycle trigger to viberoxy's
@@ -169,18 +179,18 @@ func (v *ViberoxyClient) DropWAN(ctx context.Context, index int) ([]byte, int, e
 // along with the upstream HTTP status code. Errors indicate transport-level
 // failures.
 func (v *ViberoxyClient) TriggerCycle(ctx context.Context) ([]byte, int, error) {
-	return v.client.Post(ctx, v.url+"/api/viberoxy/cycle/trigger")
+	return v.client.Post(ctx, v.apiURL+"/api/viberoxy/cycle/trigger")
 }
 
 // Healthz returns the raw healthz response body (or error).
 func (v *ViberoxyClient) Healthz(ctx context.Context) (string, error) {
-	body, err := v.client.Get(ctx, v.url+"/healthz")
+	body, err := v.client.Get(ctx, v.metricsURL+"/healthz")
 	return string(body), err
 }
 
 // Readyz returns the raw readyz response body (or error).
 func (v *ViberoxyClient) Readyz(ctx context.Context) (string, error) {
-	body, err := v.client.Get(ctx, v.url+"/readyz")
+	body, err := v.client.Get(ctx, v.metricsURL+"/readyz")
 	return string(body), err
 }
 

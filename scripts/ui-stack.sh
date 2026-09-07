@@ -67,4 +67,4 @@ EOF
 
 sleep 0.5
 rm -rf /tmp/viber-cfg-live
-VIBER_CONFIG_DIR=/tmp/viber-cfg-live VIBERAYD_API_URL=http://127.0.0.1:18081 VIBEROXY_METRICS_URL=http://127.0.0.1:19090 /tmp/viber-console-ui
+VIBER_CONFIG_DIR=/tmp/viber-cfg-live VIBERAYD_API_URL=http://127.0.0.1:18081 VIBEROXY_METRICS_URL=http://127.0.0.1:19090 VIBEROXY_API_URL=http://127.0.0.1:19090 /tmp/viber-console-ui

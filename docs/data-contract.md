@@ -34,13 +34,23 @@ The backend is **read-only for now** (dashboard). Config editing/restart is a v2
 
 `ConfigEntry` fields (from `internal/daemon/state.go`): `raw, host, port, protocol, source_url, first_seen, last_tested, last_success, success_count, fail_count, state, latency_ms`.
 
-### Viberoxy (metrics port, default `0` = off)
+### Viberoxy observability listener (`METRICS_PORT`, disabled by default)
 
 | Endpoint | Shape | What the dashboard uses it for |
 |---|---|---|
 | `GET /metrics` | Prometheus text | WAN slots, connections, bytes, latency histogram, test duration |
 | `GET /healthz` | liveness | proxy process alive |
-| `GET /readyz` | readiness | serving traffic (WANs available) |
+| `GET /readyz` | readiness | serving traffic (routable WAN available) |
+
+### Viberoxy control listener (`API_PORT`, default `1980`)
+
+| Endpoint | Shape | What the dashboard uses it for |
+|---|---|---|
+| `GET /api/viberoxy/wans` | JSON array | per-slot state, speed, connections, exit IP, probe failures |
+| `GET /api/viberoxy/candidates` | JSON array | available replacement WAN candidates |
+| `GET /api/viberoxy/cycle` | JSON object | last/next candidate-test cycle |
+| `POST /api/viberoxy/cycle/trigger` | JSON object | queue an immediate candidate-test cycle |
+| `POST /api/viberoxy/wans/{index}/drop` | JSON object | drop and replace one WAN |
 
 Viberoxy metric names (from `metrics.go`):
 
@@ -55,9 +65,10 @@ viberoxy_test_duration_seconds          histogram
 viberoxy_build_info{version}            gauge
 ```
 
-> **Note:** viberoxy has **no JSON API** — only Prometheus text. The backend must parse
-> Prometheus text format (stdlib-only parser, no dependency). This is deliberate: the
-> daemon stays zero-dep, and the console owns the aggregation.
+> **Note:** viberoxy keeps observability and control on separate listeners. The console
+> parses Prometheus text from `VIBEROXY_METRICS_URL` and proxies JSON control calls
+> through `VIBEROXY_API_URL`. Keep the control listener private; it exposes mutating
+> WAN-drop and cycle-trigger operations.
 
 ---
 
@@ -158,6 +169,7 @@ Env config (mirrors the family style):
 | `VIBERAYD_API_URL` | `http://127.0.0.1:8081` | viberayd management API |
 | `VIBERAYD_SUB_URL` | `http://127.0.0.1:8080` | viberayd subscription endpoint |
 | `VIBEROXY_METRICS_URL` | `http://127.0.0.1:9090` | viberoxy metrics/health |
+| `VIBEROXY_API_URL` | `http://127.0.0.1:1980` | viberoxy WAN control API |
 | `CONSOLE_LOG_LEVEL` | `info` | slog level |
 
 ## 5. Key decisions / trade-offs

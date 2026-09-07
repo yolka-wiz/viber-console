@@ -67,6 +67,47 @@ func fakeViberoxyControlAPI(t *testing.T) *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
+func TestViberoxyUsesSeparateMetricsAndAPIURLs(t *testing.T) {
+	metricsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/metrics" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte("viberoxy_wans_active 1\n"))
+	}))
+	defer metricsSrv.Close()
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/viberoxy/wans" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[{"index":0,"state":"active"}]`))
+	}))
+	defer apiSrv.Close()
+
+	client := NewViberoxyClientWithAPI(metricsSrv.URL, apiSrv.URL, 3*time.Second)
+	metrics, err := client.FetchMetrics(context.Background())
+	if err != nil {
+		t.Fatalf("FetchMetrics: %v", err)
+	}
+	if metrics.WansActive != 1 {
+		t.Fatalf("WansActive = %d, want 1", metrics.WansActive)
+	}
+
+	body, status, err := client.FetchWANSlots(context.Background())
+	if err != nil {
+		t.Fatalf("FetchWANSlots: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if string(body) != `[{"index":0,"state":"active"}]` {
+		t.Fatalf("body = %s", body)
+	}
+}
+
 func TestViberoxyFetchWANSlots(t *testing.T) {
 	srv := fakeViberoxyControlAPI(t)
 	defer srv.Close()

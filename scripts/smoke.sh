@@ -64,11 +64,32 @@ http.server.HTTPServer(("127.0.0.1", 19090), H).serve_forever()
 EOF
 VX_PID=$!
 
-cleanup() { kill $VD_PID $VX_PID $CONSOLE_PID 2>/dev/null || true; }
+# Mock viberoxy control API on a separate listener (:11980), matching the real
+# deployment contract where observability and control use different ports.
+python3 - <<'EOF' &
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/api/viberoxy/wans":
+            body = b'[{"index":0,"state":"active","speed_mbps":42.5}]'
+            self.send_response(200)
+        else:
+            body = b'not found'
+            self.send_response(404)
+        self.send_header("Content-Type","application/json")
+        self.send_header("Content-Length",str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", 11980), H).serve_forever()
+EOF
+VX_API_PID=$!
+
+cleanup() { kill $VD_PID $VX_PID $VX_API_PID $CONSOLE_PID 2>/dev/null || true; }
 trap cleanup EXIT
 sleep 0.5
 
-CONSOLE_LISTEN=127.0.0.1:18090 VIBERAYD_API_URL=http://127.0.0.1:18081 VIBEROXY_METRICS_URL=http://127.0.0.1:19090 /tmp/viber-console-smoke &
+CONSOLE_LISTEN=127.0.0.1:18090 VIBERAYD_API_URL=http://127.0.0.1:18081 VIBEROXY_METRICS_URL=http://127.0.0.1:19090 VIBEROXY_API_URL=http://127.0.0.1:11980 /tmp/viber-console-smoke &
 CONSOLE_PID=$!
 sleep 1
 
@@ -83,5 +104,8 @@ curl -sf "http://127.0.0.1:18090/api/viberayd/configs?page=1&per_page=50"
 echo
 echo "=== /api/viberoxy/metrics ==="
 curl -sf http://127.0.0.1:18090/api/viberoxy/metrics | head -c 400
+echo
+echo "=== /api/viberoxy/wans (separate upstream API listener) ==="
+curl -sf http://127.0.0.1:18090/api/viberoxy/wans
 echo
 echo "SMOKE OK"

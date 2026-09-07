@@ -31,6 +31,7 @@ go build -o build/console ./cmd/console
 VIBER_CONFIG_DIR=/etc/viber \
 VIBERAYD_API_URL=http://127.0.0.1:8081 \
 VIBEROXY_METRICS_URL=http://127.0.0.1:9090 \
+VIBEROXY_API_URL=http://127.0.0.1:1980 \
 ./build/console
 
 # 3. Open http://127.0.0.1:8090
@@ -45,6 +46,7 @@ VIBEROXY_METRICS_URL=http://127.0.0.1:9090 \
 | `VIBERAYD_API_URL` | `http://127.0.0.1:8081` | Viberayd management API |
 | `VIBERAYD_SUB_URL` | `http://127.0.0.1:8080` | Viberayd subscription endpoint |
 | `VIBEROXY_METRICS_URL` | `http://127.0.0.1:9090` | Viberoxy metrics/health |
+| `VIBEROXY_API_URL` | `http://127.0.0.1:1980` | Viberoxy WAN control API |
 | `VIBER_CONFIG_DIR` | `/etc/viber` | Where the daemons' env files live |
 | `VIBERAYD_BIN` / `VIBEROXY_BIN` | `viberayd` / `viberoxy` | Daemon binaries to supervise |
 | `CONSOLE_TOKEN` | (empty) | Bearer token; empty = localhost-only |
@@ -59,6 +61,10 @@ VIBEROXY_METRICS_URL=http://127.0.0.1:9090 \
 | `GET /api/viberayd/configs?page=&per_page=&state=` | Paginated config table |
 | `GET /api/viberayd/urls` | Subscription URL list |
 | `GET /api/viberoxy/metrics` | Raw parsed viberoxy metrics |
+| `GET /api/viberoxy/wans` | Per-WAN state proxied from viberoxy's control API |
+| `GET /api/viberoxy/candidates` | Working replacement candidates |
+| `POST /api/viberoxy/wans/{index}/drop` | Drop and replace one WAN |
+| `POST /api/viberoxy/cycle/trigger` | Trigger an immediate candidate cycle |
 | `GET /api/config/schema` | Editable env-var schema for both daemons |
 | `GET/POST /api/config/values` | Read / update config (atomic write + optional restart) |
 | `GET /api/processes` | Supervised process status + stderr tail |
