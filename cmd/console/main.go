@@ -103,7 +103,7 @@ func main() {
 	}()
 
 	handler := dashboard.NewHandler(store)
-	control := dashboard.NewControlHandler(store, cfgStore, services, cfg.vdAPI, cfg.token)
+	control := dashboard.NewControlHandler(store, cfgStore, services, cfg.vdAPI, cfg.token, ctx)
 	mux := handler.Routes()
 	control.Routes(mux)
 	mux.Handle("/static/", dashboard.StaticHandler())

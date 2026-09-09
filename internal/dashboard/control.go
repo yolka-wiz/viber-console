@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/yolka-wiz/viber-console/internal/config"
 	"github.com/yolka-wiz/viber-console/internal/supervisor"
@@ -15,20 +14,28 @@ import (
 // ControlHandler serves the control-plane API: config schema/values/update
 // and process management.
 type ControlHandler struct {
-	store      *Store
-	cfgStore   *config.Store
-	services   []*supervisor.Service
-	apiURL     string
-	token      string // empty = localhost-only, no token required
+	store    *Store
+	cfgStore *config.Store
+	services []*supervisor.Service
+	apiURL   string
+	token    string // empty = localhost-only, no token required
+	// ctx is the application-lifetime context. Supervised children are
+	// spawned with exec.CommandContext(ctx, ...): restarting them under a
+	// request-scoped (or function-scoped WithTimeout) context would SIGKILL
+	// the child as soon as the surrounding function returns (context
+	// canceled), and the supervisor's reaper would then refuse to
+	// auto-restart it (ctx.Err() != nil).
+	ctx context.Context
 }
 
-func NewControlHandler(store *Store, cfgStore *config.Store, services []*supervisor.Service, apiURL, token string) *ControlHandler {
+func NewControlHandler(store *Store, cfgStore *config.Store, services []*supervisor.Service, apiURL, token string, ctx context.Context) *ControlHandler {
 	return &ControlHandler{
 		store:    store,
 		cfgStore: cfgStore,
 		services: services,
 		apiURL:   apiURL,
 		token:    token,
+		ctx:      ctx,
 	}
 }
 
@@ -143,13 +150,16 @@ func (h *ControlHandler) handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-	defer cancel()
-
+	// Restart under the application context, NOT r.Context(): Start()
+	// spawns the child with exec.CommandContext(ctx, ...), so a
+	// request-scoped ctx would kill the child the moment this handler
+	// returns and permanently disable auto-restart for it. Stop() already
+	// bounds its own wait (5s grace + SIGKILL) and Start() returns right
+	// after spawn, so no extra timeout is needed here.
 	restarted := []string{}
 	for _, s := range h.services {
 		if req.Service == "all" || s.Name == req.Service {
-			if err := s.Restart(ctx); err != nil {
+			if err := s.Restart(h.ctx); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return
 			}
@@ -161,13 +171,13 @@ func (h *ControlHandler) handleRestart(w http.ResponseWriter, r *http.Request) {
 
 // restartGroup restarts all services whose name matches the config group.
 func (h *ControlHandler) restartGroup(group string) []string {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
+	// Application context (same reasoning as handleRestart): a
+	// WithTimeout scoped to this function would SIGKILL the freshly spawned
+	// child when it returns.
 	var restarted []string
 	for _, s := range h.services {
 		if s.Name == group {
-			if err := s.Restart(ctx); err != nil {
+			if err := s.Restart(h.ctx); err != nil {
 				slog.Warn("restart failed", "service", s.Name, "error", err)
 				continue
 			}
