@@ -46,7 +46,9 @@ func fakeViberaydServer(t *testing.T) *httptest.Server {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(out)
 		case http.MethodPost:
-			var body struct{ URL string `json:"url"` }
+			var body struct {
+				URL string `json:"url"`
+			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, "bad json", http.StatusBadRequest)
 				return
@@ -365,6 +367,75 @@ func TestHandlerOverview_DaemonDown(t *testing.T) {
 	if vxOut["reachable"] != false {
 		t.Error("viberoxy.reachable = true, want false (daemon down)")
 	}
+}
+
+func TestHandlerMonitorRejectsDaemonMutations(t *testing.T) {
+	h := NewHandler(nil, "monitor")
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPut, "/api/viberayd/urls"},
+		{http.MethodPost, "/api/viberoxy/wans/0/drop"},
+		{http.MethodPost, "/api/viberoxy/cycle/trigger"},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{"urls":[]}`))
+			rec := httptest.NewRecorder()
+			h.Routes().ServeHTTP(rec, req)
+			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "monitor mode") {
+				t.Fatalf("response = %d %s, want clear 409", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAPIAuthProtectsAllAPIRoutesExceptHealth(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/overview", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := RequireAPIToken(mux, "sekret")
+
+	for _, tc := range []struct {
+		name   string
+		path   string
+		token  string
+		status int
+	}{
+		{name: "missing token", path: "/api/overview", status: http.StatusUnauthorized},
+		{name: "wrong token", path: "/api/overview", token: "wrong", status: http.StatusUnauthorized},
+		{name: "valid token", path: "/api/overview", token: "sekret", status: http.StatusOK},
+		{name: "health remains public", path: "/api/health", status: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			if tc.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.token)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tc.status, rec.Body.String())
+			}
+			if tc.name == "missing token" && rec.Header().Get("WWW-Authenticate") == "" {
+				t.Fatal("missing browser authentication challenge")
+			}
+		})
+	}
+
+	t.Run("basic auth supports browser login", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/overview", nil)
+		req.SetBasicAuth("operator", "sekret")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+		}
+	})
 }
 
 func TestHandlerWANSlots(t *testing.T) {

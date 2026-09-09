@@ -14,25 +14,33 @@ import (
 // daemons directly, so a slow or dead daemon degrades the UI instead of
 // hanging it.
 type Store struct {
-	mu          sync.RWMutex
-	interval    time.Duration
-	vd          *collector.ViberaydClient
-	vx          *collector.ViberoxyClient
-	vdStats     *collector.ViberaydStats
-	vdReachable bool
-	vdSubURL    string
-	vxSnapshot  *collector.ViberoxySnapshot
-	vxHealth    string
-	vxReady     string
-	vxReachable bool
-	lastPoll    time.Time
+	mu           sync.RWMutex
+	interval     time.Duration
+	vd           *collector.ViberaydClient
+	vx           *collector.ViberoxyClient
+	vdStats      *collector.ViberaydStats
+	vdReachable  bool
+	vdSubURL     string
+	vxSnapshot   *collector.ViberoxySnapshot
+	vxHealth     string
+	vxReady      string
+	vxReachable  bool
+	lastPoll     time.Time
+	startedAt    time.Time
+	startupGrace time.Duration
 }
 
-func NewStore(interval time.Duration, vd *collector.ViberaydClient, vx *collector.ViberoxyClient) *Store {
+func NewStore(interval time.Duration, vd *collector.ViberaydClient, vx *collector.ViberoxyClient, startupGraces ...time.Duration) *Store {
+	startupGrace := 30 * time.Second
+	if len(startupGraces) > 0 {
+		startupGrace = startupGraces[0]
+	}
 	return &Store{
-		interval: interval,
-		vd:       vd,
-		vx:       vx,
+		interval:     interval,
+		vd:           vd,
+		vx:           vx,
+		startedAt:    time.Now(),
+		startupGrace: startupGrace,
 	}
 }
 
@@ -90,14 +98,15 @@ func (s *Store) poll(ctx context.Context) {
 
 // Snapshot is the immutable view handlers render from.
 type Snapshot struct {
-	GeneratedAt time.Time
-	Viberayd    *collector.ViberaydStats
-	ViberaydUp  bool
-	SubURL      string
-	Viberoxy    *collector.ViberoxySnapshot
-	ViberoxyUp  bool
+	GeneratedAt    time.Time
+	Viberayd       *collector.ViberaydStats
+	ViberaydUp     bool
+	SubURL         string
+	Viberoxy       *collector.ViberoxySnapshot
+	ViberoxyUp     bool
 	ViberoxyHealth string
 	ViberoxyReady  string
+	Starting       bool
 }
 
 func (s *Store) Get() Snapshot {
@@ -112,6 +121,7 @@ func (s *Store) Get() Snapshot {
 		ViberoxyUp:     s.vxReachable,
 		ViberoxyHealth: s.vxHealth,
 		ViberoxyReady:  s.vxReady,
+		Starting:       time.Since(s.startedAt) < s.startupGrace,
 	}
 }
 

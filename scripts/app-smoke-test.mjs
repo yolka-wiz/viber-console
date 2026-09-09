@@ -13,12 +13,17 @@ function loadApp({ fetchImpl } = {}) {
     innerHTML: "",
     querySelectorAll() { return []; },
   };
+  const serviceList = {
+    innerHTML: "",
+    querySelectorAll() { return []; },
+  };
   const document = {
     hidden: false,
     documentElement: { dataset: {} },
     addEventListener() {},
     querySelector(selector) {
       if (selector === "#wan-list") return wanList;
+      if (selector === "#service-list") return serviceList;
       return null;
     },
     querySelectorAll() { return []; },
@@ -42,7 +47,7 @@ function loadApp({ fetchImpl } = {}) {
     clearTimeout,
   });
   vm.runInContext(source, context, { filename: "app.js" });
-  return { app: window.ViberConsole, wanList };
+  return { app: window.ViberConsole, wanList, serviceList };
 }
 
 test("normalizes and sorts the per-slot WAN API response", () => {
@@ -97,4 +102,25 @@ test("relative timestamps are human-readable", () => {
   const now = Date.parse("2026-09-05T12:00:00Z");
   assert.equal(app.relativeTime("2026-09-05T11:58:00Z", now), "2 minutes ago");
   assert.equal(app.relativeTime("2026-09-05T12:01:00Z", now), "in 1 minute");
+});
+
+test("renders external startup and unreachable states without Restart", () => {
+  const { app, serviceList } = loadApp();
+  app.renderServices([
+    { name: "viberoxy", state: "starting", running: false, externally_managed: true, restart_available: false },
+    { name: "viberayd", state: "unreachable", running: false, externally_managed: true, restart_available: false },
+  ], {});
+  assert.match(serviceList.innerHTML, /Starting/);
+  assert.match(serviceList.innerHTML, /Unreachable/);
+  assert.doesNotMatch(serviceList.innerHTML, />Restart<\/button>/);
+  assert.doesNotMatch(serviceList.innerHTML, /Stopped/);
+});
+
+test("monitor mode hides WAN mutation actions", () => {
+  const { app, wanList } = loadApp();
+  app.normalizeServices({ mode: "monitor", services: [] });
+  app.renderWANs(app.normalizeWANs([
+    { index: 0, state: "active", speed_mbps: 42.5 },
+  ]), true);
+  assert.doesNotMatch(wanList.innerHTML, />Drop<\/button>/);
 });
