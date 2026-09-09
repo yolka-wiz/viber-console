@@ -31,7 +31,7 @@ func newControlHandler(t *testing.T, cfgDir string) (*ControlHandler, *Store) {
 	go store.Run(ctx)
 
 	cfgStore := config.NewStore(cfgDir)
-	return NewControlHandler(store, cfgStore, nil, vdSrv.URL, ""), store
+	return NewControlHandler(store, cfgStore, nil, vdSrv.URL, "", context.Background()), store
 }
 
 // collectorClient builds a viberayd client against a fake server URL.
@@ -150,7 +150,7 @@ func TestControlAuth(t *testing.T) {
 	vdSrv := fakeViberaydServer(t)
 	t.Cleanup(vdSrv.Close)
 	cfgStore := config.NewStore(t.TempDir())
-	h := NewControlHandler(nil, cfgStore, nil, vdSrv.URL, "sekret")
+	h := NewControlHandler(nil, cfgStore, nil, vdSrv.URL, "sekret", context.Background())
 
 	mux := http.NewServeMux()
 	h.Routes(mux)
@@ -218,7 +218,7 @@ func TestControlProcessesWithService(t *testing.T) {
 	vdSrv := fakeViberaydServer(t)
 	t.Cleanup(vdSrv.Close)
 	cfgStore := config.NewStore(t.TempDir())
-	h := NewControlHandler(nil, cfgStore, []*supervisor.Service{svc}, vdSrv.URL, "")
+	h := NewControlHandler(nil, cfgStore, []*supervisor.Service{svc}, vdSrv.URL, "", context.Background())
 
 	code, out := doJSON(t, h, "GET", "/api/processes", nil)
 	if code != http.StatusOK {
