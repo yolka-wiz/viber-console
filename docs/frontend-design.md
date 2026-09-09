@@ -65,11 +65,11 @@ flowchart LR
 ```
 
 - **Read path:** console polls both daemons (already built), serves aggregated JSON.
-- **Control path (new):** console reads/writes the daemons' **env files** (their only
-  config surface) and **restarts the daemon processes**. Atomic write + backup.
-- **Process ownership:** console is the **supervisor** — it spawns both daemons as
-  children (systemd-free), so it can restart them from the UI and inside Docker.
-  (Decision point — see §8.)
+- **Control path (`CONSOLE_MODE=supervise`):** console reads/writes the daemons'
+  **env files** and restarts its child processes. Atomic write + backup.
+- **Monitor path (`CONSOLE_MODE=monitor`):** systemd or another runtime owns the
+  daemons. Console observes HTTP reachability only and rejects config, URL,
+  restart, WAN-drop, and cycle-trigger mutations with HTTP `409`.
 
 ---
 
@@ -138,11 +138,11 @@ New (control):
 | `GET /api/config/values` | current values (read from env files + live daemon state) |
 | `POST /api/config/values` | update values → validate → atomic write env files (with `.bak`) → **restart affected daemon(s)** |
 | `POST /api/control/restart` | restart `viberayd` / `viberoxy` / `console`-managed children |
-| `GET /api/processes` | supervisor view: pid, uptime, exit status, restart count, stderr tail (last 50 lines) |
+| `GET /api/processes` | lifecycle-aware view; supervised children expose process status, while monitor mode exposes `starting`/`running`/`unreachable`, `externally_managed=true`, and no Restart action |
 
-Auth: console binds `127.0.0.1` by default; when bound to a network interface it
-requires a bearer token (`CONSOLE_TOKEN`) — checked on every `/api/*` except
-`/api/health`.
+Auth: console binds `127.0.0.1` by default. Startup rejects any non-loopback
+listener without `CONSOLE_TOKEN`; when configured, the token is checked on every
+`/api/*` route except `/api/health`.
 
 ### Config schema (which params are "core")
 

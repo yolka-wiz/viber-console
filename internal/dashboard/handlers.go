@@ -13,10 +13,15 @@ import (
 // Handler serves the dashboard API. The store holds the polled snapshots.
 type Handler struct {
 	store *Store
+	mode  string
 }
 
-func NewHandler(store *Store) *Handler {
-	return &Handler{store: store}
+func NewHandler(store *Store, modes ...string) *Handler {
+	mode := "supervise"
+	if len(modes) > 0 {
+		mode = modes[0]
+	}
+	return &Handler{store: store, mode: mode}
 }
 
 // Routes returns the http mux with all /api routes registered.
@@ -32,6 +37,14 @@ func (h *Handler) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/viberoxy/cycle/trigger", h.handleTriggerCycle)
 	mux.HandleFunc("/api/viberoxy/wans/", h.handleDropWAN)
 	return mux
+}
+
+func (h *Handler) rejectMonitorMutation(w http.ResponseWriter) bool {
+	if h.mode != "monitor" {
+		return false
+	}
+	writeJSON(w, http.StatusConflict, map[string]string{"error": "operation is unavailable in monitor mode"})
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -123,6 +136,9 @@ func (h *Handler) handleViberaydURLs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"urls": urls})
 
 	case http.MethodPut:
+		if h.rejectMonitorMutation(w) {
+			return
+		}
 		var req struct {
 			URLs []string `json:"urls"`
 		}
@@ -226,6 +242,9 @@ func (h *Handler) handleDropWAN(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
+	if h.rejectMonitorMutation(w) {
+		return
+	}
 	// Path: /api/viberoxy/wans/{index}/drop
 	prefix := "/api/viberoxy/wans/"
 	if !strings.HasPrefix(r.URL.Path, prefix) {
@@ -256,6 +275,9 @@ func (h *Handler) handleDropWAN(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleTriggerCycle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if h.rejectMonitorMutation(w) {
 		return
 	}
 	body, status, err := h.store.TriggerCycle(r.Context())

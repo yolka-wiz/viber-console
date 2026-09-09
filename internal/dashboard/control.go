@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/yolka-wiz/viber-console/internal/config"
@@ -15,20 +14,26 @@ import (
 // ControlHandler serves the control-plane API: config schema/values/update
 // and process management.
 type ControlHandler struct {
-	store      *Store
-	cfgStore   *config.Store
-	services   []*supervisor.Service
-	apiURL     string
-	token      string // empty = localhost-only, no token required
+	store    *Store
+	cfgStore *config.Store
+	services []*supervisor.Service
+	apiURL   string
+	token    string // empty = localhost-only, no token required
+	mode     string
 }
 
-func NewControlHandler(store *Store, cfgStore *config.Store, services []*supervisor.Service, apiURL, token string) *ControlHandler {
+func NewControlHandler(store *Store, cfgStore *config.Store, services []*supervisor.Service, apiURL, token string, modes ...string) *ControlHandler {
+	mode := "supervise"
+	if len(modes) > 0 {
+		mode = modes[0]
+	}
 	return &ControlHandler{
 		store:    store,
 		cfgStore: cfgStore,
 		services: services,
 		apiURL:   apiURL,
 		token:    token,
+		mode:     mode,
 	}
 }
 
@@ -53,14 +58,7 @@ func (h *ControlHandler) auth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (h *ControlHandler) validToken(r *http.Request) bool {
-	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") && strings.TrimSpace(strings.TrimPrefix(auth, "Bearer ")) == h.token {
-		return true
-	}
-	if r.Header.Get("X-Console-Token") == h.token {
-		return true
-	}
-	return false
+	return validAPIToken(r, h.token)
 }
 
 func (h *ControlHandler) handleSchema(w http.ResponseWriter, r *http.Request) {
@@ -87,6 +85,10 @@ func (h *ControlHandler) handleValues(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, out)
 
 	case http.MethodPost:
+		if h.mode == "monitor" {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "configuration changes are unavailable in monitor mode"})
+			return
+		}
 		var req struct {
 			Group   string            `json:"group"`
 			Values  map[string]string `json:"values"`
@@ -123,16 +125,53 @@ func (h *ControlHandler) handleValues(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ControlHandler) handleProcesses(w http.ResponseWriter, r *http.Request) {
+	if h.mode == "monitor" {
+		snap := h.store.Get()
+		statuses := []externalServiceStatus{
+			externalStatus("viberayd", snap.ViberaydUp, !snap.ViberaydUp && snap.Starting),
+			externalStatus("viberoxy", snap.ViberoxyUp, !snap.ViberoxyUp && snap.Starting),
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"mode": h.mode, "services": statuses})
+		return
+	}
 	statuses := make([]supervisor.Status, 0, len(h.services))
 	for _, s := range h.services {
 		statuses = append(statuses, s.Status())
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"services": statuses})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"mode": h.mode, "services": statuses})
+}
+
+type externalServiceStatus struct {
+	Name              string `json:"name"`
+	State             string `json:"state"`
+	Running           bool   `json:"running"`
+	ExternallyManaged bool   `json:"externally_managed"`
+	RestartAvailable  bool   `json:"restart_available"`
+}
+
+func externalStatus(name string, reachable, starting bool) externalServiceStatus {
+	state := "unreachable"
+	if starting {
+		state = "starting"
+	} else if reachable {
+		state = "running"
+	}
+	return externalServiceStatus{
+		Name:              name,
+		State:             state,
+		Running:           reachable,
+		ExternallyManaged: true,
+		RestartAvailable:  false,
+	}
 }
 
 func (h *ControlHandler) handleRestart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if h.mode == "monitor" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "service restart is unavailable in monitor mode"})
 		return
 	}
 	var req struct {

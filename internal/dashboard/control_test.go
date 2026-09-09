@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,6 +180,26 @@ func TestControlAuth(t *testing.T) {
 	}
 }
 
+func TestControlMonitorRejectsMutations(t *testing.T) {
+	cfgDir := t.TempDir()
+	h := NewControlHandler(nil, config.NewStore(cfgDir), nil, "", "", "monitor")
+
+	code, out := doJSON(t, h, http.MethodPost, "/api/config/values", map[string]interface{}{
+		"group": "viberoxy", "values": map[string]string{"WAN_COUNT": "3"},
+	})
+	if code != http.StatusConflict || !strings.Contains(out["error"].(string), "monitor mode") {
+		t.Fatalf("config POST = %d, body %v; want clear 409", code, out)
+	}
+	if _, err := os.Stat(filepath.Join(cfgDir, "viberoxy.env")); !os.IsNotExist(err) {
+		t.Fatalf("monitor config POST wrote env file: %v", err)
+	}
+
+	code, out = doJSON(t, h, http.MethodPost, "/api/control/restart", map[string]string{"service": "viberoxy"})
+	if code != http.StatusConflict || !strings.Contains(out["error"].(string), "monitor mode") {
+		t.Fatalf("restart POST = %d, body %v; want clear 409", code, out)
+	}
+}
+
 func TestControlRestartUnknownService(t *testing.T) {
 	h, _ := newControlHandler(t, t.TempDir())
 	code, out := doJSON(t, h, "POST", "/api/control/restart", map[string]interface{}{
@@ -202,6 +223,82 @@ func TestControlProcesses(t *testing.T) {
 	svcs := out["services"].([]interface{})
 	if len(svcs) != 0 {
 		t.Errorf("services = %d, want 0", len(svcs))
+	}
+}
+
+func TestControlProcessesMonitorStartsUnknown(t *testing.T) {
+	store := NewStore(time.Second, nil, nil)
+	h := NewControlHandler(store, config.NewStore(t.TempDir()), nil, "", "", "monitor")
+
+	code, out := doJSON(t, h, http.MethodGet, "/api/processes", nil)
+	if code != http.StatusOK {
+		t.Fatalf("processes = %d, want 200", code)
+	}
+	for _, raw := range out["services"].([]interface{}) {
+		service := raw.(map[string]interface{})
+		if service["state"] != "starting" || service["running"] != false {
+			t.Errorf("initial service = %v, want starting and not yet running", service)
+		}
+	}
+}
+
+func TestControlProcessesMonitorKeepsStartingDuringGrace(t *testing.T) {
+	vd := collector.NewViberaydClient("http://127.0.0.1:1", "http://127.0.0.1:1", 20*time.Millisecond)
+	vx := collector.NewViberoxyClient("http://127.0.0.1:1", 20*time.Millisecond)
+	store := NewStore(time.Second, vd, vx, 50*time.Millisecond)
+	store.poll(context.Background())
+	h := NewControlHandler(store, config.NewStore(t.TempDir()), nil, "", "", "monitor")
+
+	_, out := doJSON(t, h, http.MethodGet, "/api/processes", nil)
+	for _, raw := range out["services"].([]interface{}) {
+		if service := raw.(map[string]interface{}); service["state"] != "starting" {
+			t.Errorf("during grace service = %v, want starting", service)
+		}
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	_, out = doJSON(t, h, http.MethodGet, "/api/processes", nil)
+	for _, raw := range out["services"].([]interface{}) {
+		service := raw.(map[string]interface{})
+		if service["state"] != "unreachable" {
+			t.Errorf("after grace service = %v, want unreachable", service)
+		}
+		if service["running"] != false || service["externally_managed"] != true || service["restart_available"] != false {
+			t.Errorf("after grace service = %v, want unreachable external service without restart", service)
+		}
+	}
+}
+
+func TestControlProcessesMonitorReportsReachableExternalServices(t *testing.T) {
+	_, store := newControlHandler(t, t.TempDir())
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if snap := store.Get(); snap.ViberaydUp && snap.ViberoxyUp {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	h := NewControlHandler(store, config.NewStore(t.TempDir()), nil, "", "", "monitor")
+	code, out := doJSON(t, h, http.MethodGet, "/api/processes", nil)
+	if code != http.StatusOK {
+		t.Fatalf("processes = %d, want 200", code)
+	}
+	services := out["services"].([]interface{})
+	if len(services) != 2 {
+		t.Fatalf("services = %d, want 2", len(services))
+	}
+	for _, raw := range services {
+		service := raw.(map[string]interface{})
+		if service["running"] != true || service["state"] != "running" {
+			t.Errorf("service = %v, want running", service)
+		}
+		if service["externally_managed"] != true || service["restart_available"] != false {
+			t.Errorf("service = %v, want externally managed without restart", service)
+		}
+		if _, ok := service["pid"]; ok {
+			t.Errorf("service = %v, monitor status must not expose a PID", service)
+		}
 	}
 }
 

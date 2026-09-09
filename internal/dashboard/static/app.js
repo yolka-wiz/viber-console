@@ -9,6 +9,7 @@ const SLIDER_KEYS = new Set([
 ]);
 
 const state = {
+  mode: "supervise",
   overview: null,
   wans: [],
   services: [],
@@ -186,6 +187,7 @@ function normalizeWANs(payload) {
 }
 
 function normalizeServices(payload) {
+  if (payload?.mode) state.mode = String(payload.mode).toLowerCase();
   return Array.isArray(payload) ? payload : (payload?.services || []);
 }
 
@@ -233,7 +235,7 @@ function renderWANs(wans, reachable = true) {
   element.innerHTML = wans.map((wan) => {
     const visual = wanVisualState(wan);
     const dropping = state.dropping.has(wan.index);
-    const canDrop = ["active", "draining"].includes(wan.state) && !dropping;
+    const canDrop = state.mode !== "monitor" && ["active", "draining"].includes(wan.state) && !dropping;
     const width = wan.speed_mbps > 0 ? Math.max(4, Math.round((wan.speed_mbps / maxSpeed) * 100)) : 0;
     const probe = wan.last_probe ? relativeTime(wan.last_probe) : "not probed";
     const stale = wan.last_probe && isStale(wan.last_probe, Math.max(STALE_AFTER_MS, POLL_MS * 6));
@@ -254,7 +256,7 @@ function renderWANs(wans, reachable = true) {
         </div>
         <div class="wan-header">
           <span class="wan-speed">${details.join(" · ")}</span>
-          <button class="btn danger small wan-drop" data-index="${wan.index}" ${canDrop ? "" : "disabled"}>${dropping ? "Replacing…" : "Drop"}</button>
+          ${state.mode === "monitor" ? "" : `<button class="btn danger small wan-drop" data-index="${wan.index}" ${canDrop ? "" : "disabled"}>${dropping ? "Replacing…" : "Drop"}</button>`}
         </div>
       </article>`;
   }).join("");
@@ -297,20 +299,24 @@ function renderServices(services, fallback) {
   const rows = ["viberoxy", "viberayd"].map((name) => {
     const service = byName.get(name);
     const reachable = Boolean(fallback[name]?.reachable);
-    return service || { name, running: reachable, externally_managed: true };
+    return service || { name, state: reachable ? "running" : "unreachable", running: reachable, externally_managed: true, restart_available: false };
   });
   $("#service-list").innerHTML = rows.map((service) => {
     const busy = state.restarting.has(service.name);
     const running = Boolean(service.running);
-    const status = busy ? "Restarting…" : (running ? "Running" : "Stopped");
+    const serviceState = String(service.state || (running ? "running" : "stopped")).toLowerCase();
+    const labels = { running: "Running", starting: "Starting", unreachable: "Unreachable", stopped: "Stopped" };
+    const status = busy ? "Restarting…" : (labels[serviceState] || serviceState);
+    const canRestart = service.restart_available !== false && !service.externally_managed;
     const extra = running && service.uptime_sec ? ` · up ${formatDuration(service.uptime_sec)}` : "";
+    const visualState = busy || serviceState === "starting" ? "starting" : (running ? "running" : "stopped");
     return `
       <div class="service-row">
         <div class="service-info">
-          <span class="service-dot ${busy ? "starting" : (running ? "running" : "stopped")}"></span>
+          <span class="service-dot ${visualState}"></span>
           <span><span class="service-name">${esc(service.name)}</span><br><span class="service-status">${status}${extra}</span></span>
         </div>
-        <button class="btn ghost small service-restart" data-service="${esc(service.name)}" ${busy ? "disabled" : ""}>${busy ? "Restarting…" : "Restart"}</button>
+        ${canRestart ? `<button class="btn ghost small service-restart" data-service="${esc(service.name)}" ${busy ? "disabled" : ""}>${busy ? "Restarting…" : "Restart"}</button>` : ""}
       </div>`;
   }).join("");
   $("#service-list").querySelectorAll?.(".service-restart").forEach((button) => {
@@ -576,7 +582,7 @@ function init() {
 // A small public surface makes the dependency-free smoke test possible without
 // changing runtime behavior.
 if (typeof window !== "undefined") {
-  window.ViberConsole = { api, relativeTime, normalizeWANs, wanVisualState, renderWANs };
+  window.ViberConsole = { api, relativeTime, normalizeWANs, normalizeServices, wanVisualState, renderWANs, renderServices };
 }
 
 document.addEventListener("DOMContentLoaded", init);
